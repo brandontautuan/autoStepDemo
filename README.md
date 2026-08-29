@@ -9,7 +9,9 @@ npm install
 npm start
 ```
 
-The supported deployment target for this migration is macOS. The Rust collector is selected by default on macOS. It uses JXA/AppleScript through `System Events` to enumerate windows from all accessible processes, including minimized and untitled windows. The observer’s own window is excluded. The first time you run it on macOS, click **Open Accessibility settings**, enable the app under **System Settings → Privacy & Security → Accessibility**, then restart the app. Set `WINDOW_OBSERVER_COLLECTOR=js` to force the JavaScript fallback.
+The supported deployment target for this migration is macOS. The Rust collector is selected by default on macOS and uses Core Graphics to enumerate active, on-screen layer-0 windows. Minimized and hidden windows are excluded, while untitled on-screen windows are retained. The observer’s own window is excluded. Set `WINDOW_OBSERVER_COLLECTOR=js` to force the JavaScript fallback, which applies the same active-window filter through JXA.
+
+The supported collector behavior is active-window only: Core Graphics keeps on-screen layer-0 windows, while minimized and hidden windows are excluded. Untitled on-screen windows are retained. Snapshot history is unbounded and written atomically.
 
 ## Stored data
 
@@ -25,12 +27,23 @@ The repository folder contains:
 
 - `latest.json` — the most recent scan.
 - `history.json` — snapshots saved whenever the open-window set changes.
+- `activity.json` — a flat, human-readable log of completed foreground intervals. Each entry contains `timestamp`, `windowTitle`, `appName`, `path`, `processId`, `processName`, and `durationMs`.
 
 Each window includes `appName`, `processName`, `title`, `windowTitle`, `processId`, `executablePath`, `isForeground`, `isVisible`, and `isMinimized`. Empty titles are retained as untitled windows.
 
-Rust-backed snapshots may also include `activityEvents`, containing completed foreground intervals with a timestamp, application name, window title, duration in milliseconds, and platform. The existing UI ignores this additive field.
+Rust-backed snapshots may also include `activityEvents`, containing completed foreground intervals. The flat `activity.json` export is the easier-to-read version and can be summed by `appName` to calculate time spent in an application. Closing and reopening an app creates a new interval; both intervals remain in the log.
 
 No screenshots, keystrokes, or network uploads are collected.
+
+## Local API
+
+The Electron main process also serves two localhost-only read routes at `http://127.0.0.1:47821`:
+
+- `GET /api/activity` — returns the contents of `observer-data/activity.json`.
+- `GET /api/current` — returns the capture time and foreground window from `observer-data/latest.json`.
+- `GET /api/summary` — returns compact totals aggregated from `observer-data/activity.json`.
+
+Set `WINDOW_OBSERVER_API_PORT` to use a different local port. No external network interface is opened.
 
 ## Rust collector (Phases 1–3; Phase 4 groundwork)
 

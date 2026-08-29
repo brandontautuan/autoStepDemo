@@ -1,8 +1,10 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const { execFile, spawn } = require('child_process');
+const http = require('http');
+const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
-const { cleanWindow, normalizeInterval, hasWindowSetChanged } = require('./observer-core');
+const { cleanWindow, normalizeInterval, hasWindowSetChanged, readableActivityEvent, summarizeActivity } = require('./observer-core');
 
 let mainWindow;
 let observerTimer;
@@ -10,6 +12,8 @@ let rustCollector;
 let rustBuffer = '';
 let rustPending = [];
 let captureInFlight = false;
+let observerRunId = 0;
+let apiServer;
 let observerState = { running: false, intervalMs: 10000, lastSnapshot: null };
 
 function dataPaths() {
@@ -22,12 +26,80 @@ function dataPaths() {
   return {
     directory,
     latest: path.join(directory, 'latest.json'),
-    history: path.join(directory, 'history.json')
+    history: path.join(directory, 'history.json'),
+    activity: path.join(directory, 'activity.json')
   };
 }
 
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+
+function sendJson(response, statusCode, body, headers = {}) {
+  const payload = JSON.stringify(body);
+  response.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload), ...headers });
+  response.end(payload);
+}
+
+function readApiJson(file, label) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { error: `${label} data is not available yet` };
+    return { error: `${label} data is malformed` };
+  }
+}
+
+function currentFromLatest(latest) {
+  const windows = Array.isArray(latest.windows) ? latest.windows : [];
+  const current = windows.find((window) => window.isForeground) || null;
+  return {
+    capturedAt: latest.timestamp || null,
+    currentWindow: current ? {
+      appName: current.appName || '',
+      windowTitle: current.windowTitle || current.title || '',
+      path: current.path || current.executablePath || '',
+      processId: Number(current.processId) || null,
+      processName: current.processName || ''
+    } : null
+  };
+}
+
+function startApiServer() {
+  const port = Number(process.env.WINDOW_OBSERVER_API_PORT) || 47821;
+  apiServer = http.createServer((request, response) => {
+    if (request.method !== 'GET') {
+      sendJson(response, 405, { error: 'Method not allowed' }, { Allow: 'GET' });
+      return;
+    }
+    let pathname;
+    try { pathname = new URL(request.url, 'http://127.0.0.1').pathname; } catch {
+      sendJson(response, 400, { error: 'Invalid request URL' });
+      return;
+    }
+    const paths = dataPaths();
+    if (pathname === '/api/activity') {
+      const activity = readApiJson(paths.activity, 'Activity');
+      if (activity.error) return sendJson(response, activity.error.endsWith('yet') ? 404 : 500, activity);
+      if (!Array.isArray(activity)) return sendJson(response, 500, { error: 'Activity data is malformed' });
+      return sendJson(response, 200, activity);
+    }
+    if (pathname === '/api/current') {
+      const latest = readApiJson(paths.latest, 'Current snapshot');
+      if (latest.error) return sendJson(response, latest.error.endsWith('yet') ? 404 : 500, latest);
+      if (!latest || typeof latest !== 'object' || Array.isArray(latest)) return sendJson(response, 500, { error: 'Current snapshot data is malformed' });
+      return sendJson(response, 200, currentFromLatest(latest));
+    }
+    if (pathname === '/api/summary') {
+      const activity = readApiJson(paths.activity, 'Activity');
+      if (activity.error) return sendJson(response, activity.error.endsWith('yet') ? 404 : 500, activity);
+      if (!Array.isArray(activity)) return sendJson(response, 500, { error: 'Activity data is malformed' });
+      return sendJson(response, 200, summarizeActivity(activity));
+    }
+    sendJson(response, 404, { error: 'Not found' });
+  });
+  apiServer.on('error', (error) => console.error(`Local API server error: ${error.message}`));
+  apiServer.listen(port, '127.0.0.1', () => console.log(`Local API listening at http://127.0.0.1:${port}`));
 }
 
 function writeJson(file, value) {
@@ -176,12 +248,15 @@ function openAccessibilitySettings() {
   return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility').then(() => true);
 }
 
-async function captureSnapshot() {
+async function captureSnapshot({ runId } = {}) {
   const timestamp = new Date().toISOString();
   let windows;
   let activityEvents = [];
   try {
     const result = await windowsOpenApps();
+    // A pause can happen while the native collector is responding. Do not let
+    // that in-flight response write a snapshot after the observer was stopped.
+    if (runId !== undefined && (runId !== observerRunId || !observerState.running)) return observerState.lastSnapshot;
     windows = Array.isArray(result) ? result : result.windows;
     activityEvents = Array.isArray(result) ? [] : (result.activityEvents || []);
   } catch (error) {
@@ -191,10 +266,14 @@ async function captureSnapshot() {
   const snapshot = { timestamp, platform: process.platform, windowCount: windows.length, windows, activityEvents };
   const paths = dataPaths();
   const latest = readJson(paths.latest, null);
+  if (activityEvents.length > 0) {
+    const activity = readJson(paths.activity, []);
+    activity.push(...activityEvents.map(readableActivityEvent));
+    writeJson(paths.activity, activity);
+  }
   if (hasWindowSetChanged(latest, windows)) {
     const history = readJson(paths.history, []);
     history.push(snapshot);
-    if (history.length > 1000) history.splice(0, history.length - 1000);
     writeJson(paths.history, history);
   }
   writeJson(paths.latest, snapshot);
@@ -206,13 +285,15 @@ async function captureSnapshot() {
 function runScheduledCapture() {
   if (captureInFlight) return;
   captureInFlight = true;
-  captureSnapshot().catch((error) => console.error(`Observer capture failed: ${error.message}`)).finally(() => {
+  const runId = observerRunId;
+  captureSnapshot({ runId }).catch((error) => console.error(`Observer capture failed: ${error.message}`)).finally(() => {
     captureInFlight = false;
   });
 }
 
 function startObserver(intervalMs = observerState.intervalMs) {
   stopObserver();
+  observerRunId += 1;
   observerState = { running: true, intervalMs: normalizeInterval(intervalMs), lastSnapshot: observerState.lastSnapshot };
   runScheduledCapture();
   observerTimer = setInterval(runScheduledCapture, observerState.intervalMs);
@@ -220,6 +301,7 @@ function startObserver(intervalMs = observerState.intervalMs) {
 }
 
 function stopObserver() {
+  observerRunId += 1;
   if (observerTimer) clearInterval(observerTimer);
   observerTimer = null;
   observerState.running = false;
@@ -248,9 +330,10 @@ function registerIpcHandlers() {
   ipcMain.handle('observer:start', (_, interval) => startObserver(interval));
   ipcMain.handle('observer:stop', () => stopObserver());
   ipcMain.handle('observer:capture', captureSnapshot);
-  ipcMain.handle('observer:state', () => ({ ...observerState, latest: readJson(dataPaths().latest, null), history: readJson(dataPaths().history, []) }));
+  ipcMain.handle('observer:state', () => ({ ...observerState, latest: readJson(dataPaths().latest, null), history: readJson(dataPaths().history, []), activity: readJson(dataPaths().activity, []) }));
   ipcMain.handle('observer:open-data', () => shell.openPath(dataPaths().directory));
   ipcMain.handle('observer:open-accessibility', openAccessibilitySettings);
+  startApiServer();
   createWindow();
   startObserver();
 }
@@ -264,7 +347,8 @@ async function runHeadlessSmokeTest() {
 if (process.versions.electron) {
   app.whenReady().then(process.env.WINDOW_OBSERVER_HEADLESS_TEST === '1' ? runHeadlessSmokeTest : registerIpcHandlers);
   app.on('will-quit', shutdownRustCollector);
+  app.on('will-quit', () => { if (apiServer) apiServer.close(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }
 
-module.exports = { cleanWindow, normalizeInterval, hasWindowSetChanged, readJson, writeJson, windowsOpenApps, openAccessibilitySettings, captureSnapshot, startObserver, stopObserver };
+module.exports = { cleanWindow, normalizeInterval, hasWindowSetChanged, readJson, writeJson, windowsOpenApps, openAccessibilitySettings, currentFromLatest, startObserver, stopObserver };

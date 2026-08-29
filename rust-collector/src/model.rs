@@ -35,6 +35,11 @@ pub struct ActivityEvent {
     pub app_name: String,
     #[serde(rename = "windowTitle")]
     pub window_title: String,
+    #[serde(rename = "processId")]
+    pub process_id: u32,
+    #[serde(rename = "processName")]
+    pub process_name: String,
+    pub path: String,
     #[serde(rename = "durationMs")]
     pub duration_ms: u128,
     pub platform: String,

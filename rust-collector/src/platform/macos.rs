@@ -56,20 +56,37 @@ fn collect_with_native(binary: String, excluded: u32) -> Result<Vec<WindowRecord
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| error.to_string())?;
-        let stdin = child.stdin.take().ok_or("native collector stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("native collector stdout unavailable")?;
-        *guard = Some(NativeCollector { child, stdin, stdout: BufReader::new(stdout) });
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("native collector stdin unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("native collector stdout unavailable")?;
+        *guard = Some(NativeCollector {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        });
     }
     let result = (|| {
         let collector = guard.as_mut().ok_or("native collector unavailable")?;
-        collector.stdin.write_all(b"capture\n").map_err(|error| error.to_string())?;
+        collector
+            .stdin
+            .write_all(b"capture\n")
+            .map_err(|error| error.to_string())?;
         collector.stdin.flush().map_err(|error| error.to_string())?;
         let mut line = String::new();
-        collector.stdout.read_line(&mut line).map_err(|error| error.to_string())?;
+        collector
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
         if line.trim().is_empty() {
             return Err("native macOS helper exited before responding".into());
         }
-        let response: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
+        let response: serde_json::Value =
+            serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
         serde_json::from_value(response["windows"].clone()).map_err(|error| error.to_string())
     })();
     if result.is_err() {

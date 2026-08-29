@@ -19,57 +19,58 @@ fn exclude_pid(args: &[String]) -> Option<u32> {
 }
 
 struct ActivityState {
-    active_key: Option<String>,
+    active_window: Option<WindowRecord>,
     active_since: Option<SystemTime>,
 }
 
 impl ActivityState {
     fn new() -> Self {
         Self {
-            active_key: None,
+            active_window: None,
             active_since: None,
         }
     }
 
     fn update(&mut self, windows: &[WindowRecord]) -> Vec<ActivityEvent> {
         let active = windows.iter().find(|window| window.is_foreground);
-        let next_key = active.map(|window| {
-            format!(
-                "{}:{}:{}",
-                window.process_id, window.app_name, window.window_title
-            )
-        });
-        if next_key == self.active_key {
+        let next_window = active.cloned();
+        let same_window = self
+            .active_window
+            .as_ref()
+            .zip(next_window.as_ref())
+            .is_some_and(|(old, new)| {
+                old.process_id == new.process_id
+                    && old.app_name == new.app_name
+                    && old.window_title == new.window_title
+            });
+        if same_window || self.active_window.is_none() && next_window.is_none() {
             return Vec::new();
         }
 
         let now = SystemTime::now();
         let mut events = Vec::new();
-        if let (Some(previous_key), Some(started)) = (&self.active_key, self.active_since) {
-            if let Some((process_id, app_name, window_title)) = previous_key
-                .split_once(':')
-                .and_then(|(pid, rest)| rest.split_once(':').map(|(app, title)| (pid, app, title)))
-            {
-                events.push(ActivityEvent {
-                    timestamp: unix_millis(now),
-                    app_name: app_name.to_string(),
-                    window_title: window_title.to_string(),
-                    duration_ms: now
-                        .duration_since(started)
-                        .unwrap_or(Duration::ZERO)
-                        .as_millis(),
-                    platform: if cfg!(target_os = "macos") {
-                        "darwin"
-                    } else {
-                        "windows"
-                    }
-                    .to_string(),
-                });
-                let _ = process_id;
-            }
+        if let (Some(previous), Some(started)) = (&self.active_window, self.active_since) {
+            events.push(ActivityEvent {
+                timestamp: unix_millis(now),
+                app_name: previous.app_name.clone(),
+                window_title: previous.window_title.clone(),
+                process_id: previous.process_id,
+                process_name: previous.process_name.clone(),
+                path: previous.executable_path.clone(),
+                duration_ms: now
+                    .duration_since(started)
+                    .unwrap_or(Duration::ZERO)
+                    .as_millis(),
+                platform: if cfg!(target_os = "macos") {
+                    "darwin"
+                } else {
+                    "windows"
+                }
+                .to_string(),
+            });
         }
-        self.active_key = next_key;
-        self.active_since = self.active_key.as_ref().map(|_| now);
+        self.active_window = next_window;
+        self.active_since = self.active_window.as_ref().map(|_| now);
         events
     }
 }
@@ -149,12 +150,29 @@ mod tests {
     #[test]
     fn emits_a_completed_activity_interval_when_foreground_changes() {
         let mut state = ActivityState {
-            active_key: Some("1:Editor:Draft".into()),
+            active_window: Some(window("Editor", "Draft", 1, true)),
             active_since: Some(SystemTime::now() - Duration::from_millis(10)),
         };
         let events = state.update(&[window("Browser", "Home", 2, true)]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].app_name, "Editor");
+        assert_eq!(events[0].process_id, 1);
         assert!(events[0].duration_ms >= 10);
+    }
+
+    #[test]
+    fn reopening_an_app_starts_a_new_interval_when_the_process_id_changes() {
+        let mut state = ActivityState {
+            active_window: Some(window("Safari", "Home", 1, true)),
+            active_since: Some(SystemTime::now() - Duration::from_millis(10)),
+        };
+        let events = state.update(&[window("Safari", "Home", 2, true)]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].process_id, 1);
+        assert_eq!(
+            state.active_window.as_ref().map(|item| item.process_id),
+            Some(2)
+        );
+        assert!(state.active_since.is_some());
     }
 }
