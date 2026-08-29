@@ -1,0 +1,14 @@
+{
+  "name": "window-observer",
+  "version": "1.0.0",
+  "description": "A local Electron observer for tracking open Windows applications.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0"
+  }
+}
