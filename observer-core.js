@@ -1,11 +1,14 @@
-function cleanWindow(window) {
+function cleanWindow(window = {}) {
   return {
     appName: window.appName || 'Unknown app',
     processName: window.processName || '',
     title: window.title || '',
+    windowTitle: window.windowTitle || window.title || '',
     processId: Number(window.processId) || null,
     executablePath: window.executablePath || '',
-    isForeground: Boolean(window.isForeground)
+    isForeground: Boolean(window.isForeground),
+    isVisible: window.isVisible !== false,
+    isMinimized: Boolean(window.isMinimized)
   };
 }
 

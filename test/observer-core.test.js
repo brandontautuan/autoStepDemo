@@ -4,8 +4,8 @@ const { cleanWindow, normalizeInterval, windowSignature, hasWindowSetChanged } =
 
 test('cleanWindow applies the persisted window schema and safe defaults', () => {
   assert.deepEqual(cleanWindow({ appName: '', processId: '42', isForeground: 1 }), {
-    appName: 'Unknown app', processName: '', title: '', processId: 42,
-    executablePath: '', isForeground: true
+    appName: 'Unknown app', processName: '', title: '', windowTitle: '', processId: 42,
+    executablePath: '', isForeground: true, isVisible: true, isMinimized: false
   });
   assert.equal(cleanWindow({ processId: 'not-a-number' }).processId, null);
 });

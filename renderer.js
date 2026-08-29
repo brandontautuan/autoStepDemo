@@ -10,7 +10,7 @@ function render(state) {
   $('statusDot').classList.toggle('paused', !state.running);
   $('lastUpdated').textContent = snapshot ? `Last scan ${dateTime(snapshot.timestamp)}` : 'Waiting for first snapshot…';
   $('toggle').textContent = state.running ? 'Pause observer' : 'Resume observer';
-  $('appList').innerHTML = windows.length ? windows.map((item) => `<div class="app-row"><div class="app-icon">${(item.appName || '?').slice(0,1).toUpperCase()}</div><div><div class="app-name">${escapeHtml(item.appName)}</div><div class="app-title">${escapeHtml(item.title || item.processName || 'No window title')}</div></div>${item.isForeground ? '<span class="foreground">FOREGROUND</span>' : ''}</div>`).join('') : '<div class="empty">No visible app windows found.</div>';
+  $('appList').innerHTML = windows.length ? windows.map((item) => `<div class="app-row"><div class="app-icon">${(item.appName || '?').slice(0,1).toUpperCase()}</div><div><div class="app-name">${escapeHtml(item.appName)}${item.isMinimized ? ' <small>(minimized)</small>' : ''}</div><div class="app-title">${escapeHtml(item.title || item.processName || 'Untitled window')}</div></div>${item.isForeground ? '<span class="foreground">FOREGROUND</span>' : ''}</div>`).join('') : '<div class="empty">No open windows found.</div>';
   const history = state.history || [];
   $('snapshotCount').textContent = `${history.length} ${history.length === 1 ? 'snapshot' : 'snapshots'} saved`;
   $('historyList').innerHTML = history.slice().reverse().slice(0, 8).map((entry) => `<div class="history-item"><span>${entry.windowCount} open ${entry.windowCount === 1 ? 'window' : 'windows'}</span><time>${dateTime(entry.timestamp)}</time></div>`).join('') || '<div class="empty">Changes will appear here.</div>';

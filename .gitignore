@@ -1,2 +1,3 @@
 node_modules/
 observer-data/
+rust-collector/target/

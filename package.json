@@ -6,7 +6,10 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "test": "node --test"
+    "test": "node --test",
+    "rust:build": "cargo build --manifest-path rust-collector/Cargo.toml && swiftc -O -framework AppKit -framework CoreGraphics rust-collector/macos-native/main.swift -o rust-collector/target/debug/macos-native-collector",
+    "rust:test": "cargo test --manifest-path rust-collector/Cargo.toml",
+    "benchmark:macos": "node scripts/benchmark-macos.js"
   },
   "devDependencies": {
     "electron": "^44.0.0"
