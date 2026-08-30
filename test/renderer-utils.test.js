@@ -2,6 +2,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { escapeHtml } = require('../renderer-utils');
 
+function activitySummary(activity) {
+  return activity.reduce((result, item) => {
+    const app = item.appName || 'Unknown app';
+    result.apps[app] = (result.apps[app] || 0) + Number(item.durationMs || 0);
+    result.total += Number(item.durationMs || 0);
+    return result;
+  }, { apps: {}, total: 0 });
+}
+
 test('escapeHtml escapes every character that can break rendered markup', () => {
   assert.equal(escapeHtml(`<img src="x" onerror='bad'> &`), '&lt;img src=&quot;x&quot; onerror=&#39;bad&#39;&gt; &amp;');
 });
@@ -9,4 +18,12 @@ test('escapeHtml escapes every character that can break rendered markup', () => 
 test('escapeHtml stringifies nullish and numeric values', () => {
   assert.equal(escapeHtml(123), '123');
   assert.equal(escapeHtml(null), 'null');
+});
+
+test('dashboard activity summary groups durations by app', () => {
+  assert.deepEqual(activitySummary([
+    { appName: 'Code', durationMs: 120000 },
+    { appName: 'Safari', durationMs: 30000 },
+    { appName: 'Code', durationMs: 45000 },
+  ]), { apps: { Code: 165000, Safari: 30000 }, total: 195000 });
 });

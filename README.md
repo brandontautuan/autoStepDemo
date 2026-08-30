@@ -45,6 +45,26 @@ The Electron main process also serves two localhost-only read routes at `http://
 
 Set `WINDOW_OBSERVER_API_PORT` to use a different local port. No external network interface is opened.
 
+## Python activity agent
+
+Run the dependency-free local agent while Electron is running:
+
+```bash
+python3 activity_agent.py --app "Visual Studio Code" --minutes 60
+```
+
+The agent calls `/api/summary` first to verify app totals, then `/api/activity` to build the recent chronological flow, and finally `/api/current` for the current foreground window. Set `WINDOW_OBSERVER_API_URL` if the API uses a non-default local port.
+
+To use the hosted Groq reasoning layer, install the Python dependency and set `GROQ_API_KEY` in `.env` (never commit it):
+
+```bash
+python3 -m pip install -r requirements.txt
+# edit .env and set GROQ_API_KEY="your-key-here"
+python3 activity_agent.py --ask "How much time did I spend in Visual Studio Code and what was my recent app flow?"
+```
+
+The Groq chat-completions wrapper uses `openai/gpt-oss-20b` by default, forces `get_activity_summary` first, then lets the model call the detailed activity and current-window tools. It has conservative safeguards by default: at most 3 model requests and 3 total tool calls per `--ask`, each tool can be called only once, requests are spaced by 0.5 seconds, and no more than 10 requests are allowed per process minute. The response is capped at 800 output tokens. Tune these with the corresponding `GROQ_...` environment variables if desired.
+
 ## Rust collector (Phases 1–3; Phase 4 groundwork)
 
 The `rust-collector/` directory contains a standalone collector. On macOS, `npm run rust:build` also builds a native Accessibility helper used by Rust, with JXA retained as a fallback. The collector can perform one-shot collection or stay running and accept `capture` commands on stdin, emitting one JSON response per command. Rust also emits completed foreground intervals as additive `activityEvents`. Electron uses it by default on macOS; set `WINDOW_OBSERVER_COLLECTOR=js` to use the JavaScript fallback.

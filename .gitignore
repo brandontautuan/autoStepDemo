@@ -1,3 +1,13 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
 node_modules/
-observer-data/
+dist/
+build/
 rust-collector/target/
+observer-data/*.json
+*.log
+.DS_Store
