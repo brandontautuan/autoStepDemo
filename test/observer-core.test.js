@@ -42,13 +42,16 @@ test('readableActivityEvent keeps only human-readable activity fields plus durat
     isForeground: true,
     isVisible: true
   }), {
-    timestamp: '1970-01-01T00:00:00.000Z',
+    action: null,
+    app: 'Safari',
+    domain: null,
+    start: '1969-12-31T23:59:58.500Z',
+    end: '1970-01-01T00:00:00.000Z',
+    duration: 1.5,
     windowTitle: 'Example',
-    appName: 'Safari',
     path: '/Applications/Safari.app',
     processId: 42,
-    processName: 'Safari',
-    durationMs: 1500
+    processName: 'Safari'
   });
 });
 

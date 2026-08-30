@@ -7,5 +7,7 @@ contextBridge.exposeInMainWorld('observer', {
   state: () => ipcRenderer.invoke('observer:state'),
   openData: () => ipcRenderer.invoke('observer:open-data'),
   openAccessibility: () => ipcRenderer.invoke('observer:open-accessibility'),
+  memory: () => ipcRenderer.invoke('observer:memory'),
+  askAgent: (prompt) => ipcRenderer.invoke('agent:ask', prompt),
   onSnapshot: (callback) => ipcRenderer.on('snapshot-updated', (_, snapshot) => callback(snapshot))
 });

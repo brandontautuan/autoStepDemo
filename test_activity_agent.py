@@ -15,8 +15,8 @@ class FakeActivityAgent(ActivityAgent):
             return {"totalTrackedMs": 3000, "activityCount": 2, "switchCount": 1, "apps": [{"appName": "Code", "totalDurationMs": 2000, "sessions": 1}]}
         if path == "/api/activity":
             return [
-                {"timestamp": "2026-08-29T12:00:00Z", "appName": "Code", "durationMs": 2000},
-                {"timestamp": "2026-08-29T12:01:00Z", "appName": "Safari", "durationMs": 1000},
+                {"start": "2026-08-29T12:00:00Z", "app": "Code", "duration": 2},
+                {"start": "2026-08-29T12:01:00Z", "app": "Safari", "duration": 1},
             ]
         return {"capturedAt": "2026-08-29T12:02:00Z", "currentWindow": {"appName": "Safari"}}
 
@@ -32,7 +32,7 @@ class ActivityAgentTests(unittest.TestCase):
     def test_recent_activity_filters_by_time(self):
         agent = FakeActivityAgent()
         records = agent.get_recent_activity(minutes=1, now=datetime(2026, 8, 29, 12, 1, 30, tzinfo=timezone.utc))
-        self.assertEqual([record["appName"] for record in records], ["Safari"])
+        self.assertEqual([record["app"] for record in records], ["Safari"])
 
 
 class AgentBudgetTests(unittest.TestCase):

@@ -121,7 +121,7 @@ def _duration_text(duration_ms):
 def _app_flow(records):
     flow = []
     for record in records:
-        app_name = record.get("appName") or "Unknown app"
+        app_name = record.get("app") or record.get("appName") or "Unknown app"
         if not flow or flow[-1] != app_name:
             flow.append(app_name)
     return flow
@@ -156,8 +156,8 @@ class ActivityAgent:
             raise ActivityApiError("/api/activity returned an invalid response")
         current_time = now or datetime.now(timezone.utc)
         cutoff = current_time - timedelta(minutes=max(0, minutes))
-        recent = [record for record in records if (_parse_timestamp(record.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff]
-        recent.sort(key=lambda record: _parse_timestamp(record.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
+        recent = [record for record in records if (_parse_timestamp(record.get("start") or record.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff]
+        recent.sort(key=lambda record: _parse_timestamp(record.get("start") or record.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
         return recent[-limit:] if limit else recent
 
     def get_current_window(self):
@@ -169,7 +169,7 @@ class ActivityAgent:
         apps = summary.get("apps", [])
         match = None
         if app_name:
-            match = next((app for app in apps if app.get("appName", "").casefold() == app_name.casefold()), None)
+            match = next((app for app in apps if app.get("appName", app.get("app", "")).casefold() == app_name.casefold()), None)
         recent = self.get_recent_activity(minutes=recent_minutes, limit=limit, now=now)
         current = self.get_current_window()
         result = {

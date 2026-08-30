@@ -108,6 +108,14 @@ function writeJson(file, value) {
   fs.renameSync(temporary, file);
 }
 
+function migrateActivityFile() {
+  const paths = dataPaths();
+  const activity = readJson(paths.activity, null);
+  if (!Array.isArray(activity)) return;
+  const migrated = activity.map(readableActivityEvent);
+  if (JSON.stringify(activity) !== JSON.stringify(migrated)) writeJson(paths.activity, migrated);
+}
+
 function jsWindowsOpenApps() {
   return new Promise((resolve, reject) => {
     if (process.platform === 'darwin') {
@@ -248,6 +256,37 @@ function openAccessibilitySettings() {
   return shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility').then(() => true);
 }
 
+function getMemoryUsage() {
+  const processes = typeof app.getAppMetrics === 'function' ? app.getAppMetrics() : [];
+  const processRows = processes.map((metric) => ({
+    type: metric.type || 'unknown',
+    pid: Number(metric.pid) || null,
+    workingSetSizeKB: Number(metric.memory?.workingSetSize) || 0,
+    privateBytesKB: Number(metric.memory?.privateBytes) || 0,
+    cpuPercent: Number(metric.cpu?.percentCPUUsage) || 0
+  }));
+  return {
+    capturedAt: new Date().toISOString(),
+    totalWorkingSetKB: processRows.reduce((total, row) => total + row.workingSetSizeKB, 0),
+    totalPrivateBytesKB: processRows.reduce((total, row) => total + row.privateBytesKB, 0),
+    processes: processRows
+  };
+}
+
+function askActivityAgent(prompt) {
+  const question = String(prompt || '').trim();
+  if (!question) return Promise.reject(new Error('Enter a question first.'));
+  const python = process.env.WINDOW_OBSERVER_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  return new Promise((resolve, reject) => {
+    execFile(python, [path.join(__dirname, 'activity_agent.py'), '--ask', question], {
+      cwd: __dirname, timeout: 60000, env: process.env, windowsHide: true, maxBuffer: 1024 * 1024
+    }, (error, stdout, stderr) => {
+      if (error) return reject(new Error((stderr || stdout || error.message).trim()));
+      resolve(stdout.trim());
+    });
+  });
+}
+
 async function captureSnapshot({ runId } = {}) {
   const timestamp = new Date().toISOString();
   let windows;
@@ -333,6 +372,9 @@ function registerIpcHandlers() {
   ipcMain.handle('observer:state', () => ({ ...observerState, latest: readJson(dataPaths().latest, null), history: readJson(dataPaths().history, []), activity: readJson(dataPaths().activity, []) }));
   ipcMain.handle('observer:open-data', () => shell.openPath(dataPaths().directory));
   ipcMain.handle('observer:open-accessibility', openAccessibilitySettings);
+  ipcMain.handle('observer:memory', getMemoryUsage);
+  ipcMain.handle('agent:ask', (_, prompt) => askActivityAgent(prompt));
+  migrateActivityFile();
   startApiServer();
   createWindow();
   startObserver();
@@ -351,4 +393,4 @@ if (process.versions.electron) {
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }
 
-module.exports = { cleanWindow, normalizeInterval, hasWindowSetChanged, readJson, writeJson, windowsOpenApps, openAccessibilitySettings, currentFromLatest, startObserver, stopObserver };
+module.exports = { cleanWindow, normalizeInterval, hasWindowSetChanged, readJson, writeJson, windowsOpenApps, openAccessibilitySettings, currentFromLatest, askActivityAgent, startObserver, stopObserver };

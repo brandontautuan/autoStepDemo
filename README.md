@@ -27,7 +27,7 @@ The repository folder contains:
 
 - `latest.json` — the most recent scan.
 - `history.json` — snapshots saved whenever the open-window set changes.
-- `activity.json` — a flat, human-readable log of completed foreground intervals. Each entry contains `timestamp`, `windowTitle`, `appName`, `path`, `processId`, `processName`, and `durationMs`.
+- `activity.json` — a flat, human-readable log of completed foreground intervals. Each entry contains `action`, `app`, `domain`, `start`, `end`, `duration`, `windowTitle`, `path`, `processId`, and `processName`. Duration is measured in seconds; `action` and `domain` are `null` until classified.
 
 Each window includes `appName`, `processName`, `title`, `windowTitle`, `processId`, `executablePath`, `isForeground`, `isVisible`, and `isMinimized`. Empty titles are retained as untitled windows.
 
@@ -37,7 +37,7 @@ No screenshots, keystrokes, or network uploads are collected.
 
 ## Local API
 
-The Electron main process also serves two localhost-only read routes at `http://127.0.0.1:47821`:
+The Electron main process also serves localhost-only read routes at `http://127.0.0.1:47821`:
 
 - `GET /api/activity` — returns the contents of `observer-data/activity.json`.
 - `GET /api/current` — returns the capture time and foreground window from `observer-data/latest.json`.
