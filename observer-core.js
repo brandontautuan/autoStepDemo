@@ -24,23 +24,42 @@ function hasWindowSetChanged(previousSnapshot, windows) {
   return !previousSnapshot || windowSignature(windows) !== windowSignature(previousSnapshot.windows || []);
 }
 
+function normalizeAppName(app) {
+  return String(app || 'Unknown app').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function normalizeWindowTitle(title) {
+  return String(title || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+[—-]\s*\d+[×x]\d+\s*$/, '')
+    .replace(/([—-]\s*)-([a-z])/gi, '$1$2');
+}
+
 function readableActivityEvent(event = {}) {
   const end = typeof event.end === 'string'
     ? event.end
     : (typeof event.timestamp === 'number' ? new Date(event.timestamp).toISOString() : event.timestamp);
   const durationMs = event.duration != null ? Number(event.duration) * 1000 : Number(event.durationMs) || 0;
   const endDate = new Date(end);
+  const app = event.app || event.appName || 'Unknown app';
+  const windowTitle = event.windowTitle || event.title || '';
+  const process = event.process && typeof event.process === 'object' ? event.process : {};
   return {
-    action: event.action ?? null,
-    app: event.app || event.appName || 'Unknown app',
-    domain: event.domain ?? null,
     start: event.start || (Number.isNaN(endDate.getTime()) ? end : new Date(endDate.getTime() - durationMs).toISOString()),
     end,
-    duration: Math.max(0, durationMs / 1000),
-    windowTitle: event.windowTitle || event.title || '',
-    path: event.path || event.executablePath || '',
-    processId: Number(event.processId) || null,
-    processName: event.processName || ''
+    durationMs: Math.max(0, Math.round(durationMs)),
+    app,
+    normalizedApp: event.normalizedApp || normalizeAppName(app),
+    windowTitle,
+    normalizedTitle: event.normalizedTitle || normalizeWindowTitle(windowTitle),
+    domain: event.domain ?? null,
+    action: event.action ?? null,
+    process: {
+      id: Number(process.id ?? event.processId) || null,
+      name: process.name || event.processName || '',
+      path: process.path || event.path || event.executablePath || ''
+    }
   };
 }
 
@@ -67,4 +86,4 @@ function summarizeActivity(records) {
   };
 }
 
-module.exports = { cleanWindow, normalizeInterval, windowSignature, hasWindowSetChanged, readableActivityEvent, summarizeActivity };
+module.exports = { cleanWindow, normalizeInterval, windowSignature, hasWindowSetChanged, normalizeAppName, normalizeWindowTitle, readableActivityEvent, summarizeActivity };

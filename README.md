@@ -1,6 +1,6 @@
 # Window Observer
 
-Local Electron app that polls macOS application windows and records changes as JSON.
+Local Electron app that polls macOS application windows and records interval activity locally in SQLite.
 
 ## Run
 
@@ -11,7 +11,7 @@ npm start
 
 The supported deployment target for this migration is macOS. The Rust collector is selected by default on macOS and uses Core Graphics to enumerate active, on-screen layer-0 windows. Minimized and hidden windows are excluded, while untitled on-screen windows are retained. The observer’s own window is excluded. Set `WINDOW_OBSERVER_COLLECTOR=js` to force the JavaScript fallback, which applies the same active-window filter through JXA.
 
-The supported collector behavior is active-window only: Core Graphics keeps on-screen layer-0 windows, while minimized and hidden windows are excluded. Untitled on-screen windows are retained. Snapshot history is unbounded and written atomically.
+The supported collector behavior is active-window only: Core Graphics keeps on-screen layer-0 windows, while minimized and hidden windows are excluded. Untitled on-screen windows are retained. Snapshot history is unbounded and committed atomically in SQLite.
 
 ## Stored data
 
@@ -25,13 +25,18 @@ Packaged builds use Electron’s writable `userData/observer-data` directory ins
 
 The repository folder contains:
 
-- `latest.json` — the most recent scan.
-- `history.json` — snapshots saved whenever the open-window set changes.
-- `activity.json` — a flat, human-readable log of completed foreground intervals. Each entry contains `action`, `app`, `domain`, `start`, `end`, `duration`, `windowTitle`, `path`, `processId`, and `processName`. Duration is measured in seconds; `action` and `domain` are `null` until classified.
+- `observer.sqlite` — the durable database. It stores every capture, windows associated with each capture, and completed foreground intervals.
+- `feedback.json` — feedback attached to deterministic insights.
+
+On first startup, existing `latest.json`, `history.json`, and `activity.json` files are imported into `observer.sqlite` once and left in place. They are no longer written after the migration.
+
+Activity interval records returned by the API contain `start`, `end`, `durationMs`, `app`, `normalizedApp`, `windowTitle`, `normalizedTitle`, nullable `domain` and `action`, and a nested `process` object with `id`, `name`, and `path`.
 
 Each window includes `appName`, `processName`, `title`, `windowTitle`, `processId`, `executablePath`, `isForeground`, `isVisible`, and `isMinimized`. Empty titles are retained as untitled windows.
 
-Rust-backed snapshots may also include `activityEvents`, containing completed foreground intervals. The flat `activity.json` export is the easier-to-read version and can be summed by `appName` to calculate time spent in an application. Closing and reopening an app creates a new interval; both intervals remain in the log.
+Rust-backed snapshots may also include `activityEvents`, containing completed foreground intervals in the collector transport schema. Electron normalizes and batches these records before committing them to SQLite. Pausing or quitting the observer closes and persists the active interval. Closing and reopening an app creates a new interval; both intervals remain in the log.
+
+Pending captures are committed in one SQLite transaction after up to one second or when 50 captures are queued. The pending batch is flushed synchronously during shutdown.
 
 No screenshots, keystrokes, or network uploads are collected.
 
@@ -39,9 +44,12 @@ No screenshots, keystrokes, or network uploads are collected.
 
 The Electron main process also serves localhost-only read routes at `http://127.0.0.1:47821`:
 
-- `GET /api/activity` — returns the contents of `observer-data/activity.json`.
-- `GET /api/current` — returns the capture time and foreground window from `observer-data/latest.json`.
-- `GET /api/summary` — returns compact totals aggregated from `observer-data/activity.json`.
+- `GET /api/activity` — returns completed foreground intervals queried from SQLite.
+- `GET /api/current` — returns the capture time and foreground window from the most recent SQLite snapshot.
+- `GET /api/summary` — returns compact totals aggregated from SQLite.
+- `GET /api/insights` — returns deterministic work-friction findings with metrics and evidence.
+- `GET /api/insights/:id` — returns one friction finding.
+- `POST /api/insights/:id/feedback` — stores `correct`, `expected`, `incorrect`, or `ignore` feedback in `feedback.json`.
 
 Set `WINDOW_OBSERVER_API_PORT` to use a different local port. No external network interface is opened.
 

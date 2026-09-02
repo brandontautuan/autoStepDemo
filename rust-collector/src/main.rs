@@ -73,6 +73,34 @@ impl ActivityState {
         self.active_since = self.active_window.as_ref().map(|_| now);
         events
     }
+
+    fn finish(&mut self) -> Vec<ActivityEvent> {
+        let now = SystemTime::now();
+        let mut events = Vec::new();
+        if let (Some(previous), Some(started)) = (&self.active_window, self.active_since) {
+            events.push(ActivityEvent {
+                timestamp: unix_millis(now),
+                app_name: previous.app_name.clone(),
+                window_title: previous.window_title.clone(),
+                process_id: previous.process_id,
+                process_name: previous.process_name.clone(),
+                path: previous.executable_path.clone(),
+                duration_ms: now
+                    .duration_since(started)
+                    .unwrap_or(Duration::ZERO)
+                    .as_millis(),
+                platform: if cfg!(target_os = "macos") {
+                    "darwin"
+                } else {
+                    "windows"
+                }
+                .to_string(),
+            });
+        }
+        self.active_window = None;
+        self.active_since = None;
+        events
+    }
 }
 
 fn unix_millis(time: SystemTime) -> u128 {
@@ -86,6 +114,18 @@ fn collect_once(excluded: Option<u32>, activity: &mut ActivityState) -> Result<(
     let response = CollectorResponse {
         activity_events: activity.update(&windows),
         windows,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&response).map_err(|error| error.to_string())?
+    );
+    io::stdout().flush().map_err(|error| error.to_string())
+}
+
+fn flush_activity(activity: &mut ActivityState) -> Result<(), String> {
+    let response = CollectorResponse {
+        windows: Vec::new(),
+        activity_events: activity.finish(),
     };
     println!(
         "{}",
@@ -109,6 +149,7 @@ fn run() -> Result<(), String> {
     for command in io::stdin().lock().lines() {
         match command.map_err(|error| error.to_string())?.trim() {
             "capture" => collect_once(excluded, &mut activity)?,
+            "flush" => flush_activity(&mut activity)?,
             "shutdown" => break,
             "" => {}
             _ => eprintln!("window-observer-collector: unknown command"),
@@ -174,5 +215,19 @@ mod tests {
             Some(2)
         );
         assert!(state.active_since.is_some());
+    }
+
+    #[test]
+    fn finishing_emits_and_clears_the_active_interval() {
+        let mut state = ActivityState {
+            active_window: Some(window("Terminal", "Shell", 1, true)),
+            active_since: Some(SystemTime::now() - Duration::from_millis(10)),
+        };
+        let events = state.finish();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].app_name, "Terminal");
+        assert!(events[0].duration_ms >= 10);
+        assert!(state.active_window.is_none());
+        assert!(state.active_since.is_none());
     }
 }

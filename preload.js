@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('observer', {
   openData: () => ipcRenderer.invoke('observer:open-data'),
   openAccessibility: () => ipcRenderer.invoke('observer:open-accessibility'),
   memory: () => ipcRenderer.invoke('observer:memory'),
+  insights: () => ipcRenderer.invoke('observer:insights'),
+  feedback: (id, status) => ipcRenderer.invoke('observer:feedback', id, status),
   askAgent: (prompt) => ipcRenderer.invoke('agent:ask', prompt),
   onSnapshot: (callback) => ipcRenderer.on('snapshot-updated', (_, snapshot) => callback(snapshot))
 });

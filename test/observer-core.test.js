@@ -30,28 +30,27 @@ test('hasWindowSetChanged detects added, removed, and modified windows', () => {
   assert.equal(hasWindowSetChanged(null, []), true);
 });
 
-test('readableActivityEvent keeps only human-readable activity fields plus duration', () => {
+test('readableActivityEvent emits the canonical interval schema', () => {
   assert.deepEqual(readableActivityEvent({
-    timestamp: 0,
-    appName: 'Safari',
-    windowTitle: 'Example',
-    executablePath: '/Applications/Safari.app',
+    start: '2026-08-30T19:34:18.633Z',
+    end: '2026-08-30T19:34:28.608Z',
+    appName: 'Terminal',
+    windowTitle: 'autoStepDemo — -zsh — 80×24',
+    executablePath: '/Applications/Utilities/Terminal.app',
     processId: '42',
-    processName: 'Safari',
-    durationMs: '1500',
-    isForeground: true,
-    isVisible: true
+    processName: 'Terminal',
+    durationMs: '9975'
   }), {
-    action: null,
-    app: 'Safari',
+    start: '2026-08-30T19:34:18.633Z',
+    end: '2026-08-30T19:34:28.608Z',
+    durationMs: 9975,
+    app: 'Terminal',
+    normalizedApp: 'terminal',
+    windowTitle: 'autoStepDemo — -zsh — 80×24',
+    normalizedTitle: 'autoStepDemo — zsh',
     domain: null,
-    start: '1969-12-31T23:59:58.500Z',
-    end: '1970-01-01T00:00:00.000Z',
-    duration: 1.5,
-    windowTitle: 'Example',
-    path: '/Applications/Safari.app',
-    processId: 42,
-    processName: 'Safari'
+    action: null,
+    process: { id: 42, name: 'Terminal', path: '/Applications/Utilities/Terminal.app' }
   });
 });
 

@@ -4,7 +4,10 @@ const http = require('http');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
-const { cleanWindow, normalizeInterval, hasWindowSetChanged, readableActivityEvent, summarizeActivity } = require('./observer-core');
+const { cleanWindow, normalizeInterval, hasWindowSetChanged } = require('./observer-core');
+const { SqliteStore } = require('./sqlite-store');
+const { generateInsights } = require('./insights');
+const { readFeedback, setFeedback } = require('./feedback');
 
 let mainWindow;
 let observerTimer;
@@ -14,6 +17,8 @@ let rustPending = [];
 let captureInFlight = false;
 let observerRunId = 0;
 let apiServer;
+let dataStore;
+let quitFinalizationStarted = false;
 let observerState = { running: false, intervalMs: 10000, lastSnapshot: null };
 
 function dataPaths() {
@@ -27,8 +32,29 @@ function dataPaths() {
     directory,
     latest: path.join(directory, 'latest.json'),
     history: path.join(directory, 'history.json'),
-    activity: path.join(directory, 'activity.json')
+    activity: path.join(directory, 'activity.json'),
+    database: path.join(directory, 'observer.sqlite'),
+    feedback: path.join(directory, 'feedback.json')
   };
+}
+
+function getDataStore() {
+  if (!dataStore) {
+    dataStore = new SqliteStore(dataPaths().directory, {
+      onFlush: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('snapshot-updated', observerState.lastSnapshot);
+        }
+      }
+    }).initialize();
+  }
+  return dataStore;
+}
+
+function initializeDataStore() {
+  const store = getDataStore();
+  observerState.lastSnapshot = store.getLatestSnapshot({ flush: false });
+  return store;
 }
 
 function readJson(file, fallback) {
@@ -41,13 +67,34 @@ function sendJson(response, statusCode, body, headers = {}) {
   response.end(payload);
 }
 
-function readApiJson(file, label) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (error) {
-    if (error.code === 'ENOENT') return { error: `${label} data is not available yet` };
-    return { error: `${label} data is malformed` };
-  }
+function readRequestBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 10000) reject(new Error('Request body is too large'));
+    });
+    request.on('end', () => {
+      try { resolve(body ? JSON.parse(body) : {}); } catch { reject(new Error('Request body must be valid JSON')); }
+    });
+    request.on('error', reject);
+  });
+}
+
+function insightsWithFeedback() {
+  const paths = dataPaths();
+  const activity = getDataStore().getActivity();
+  const feedback = readFeedback(paths.feedback);
+  return generateInsights(activity).map((insight) => ({
+    ...insight,
+    status: feedback[insight.id]?.status || null,
+    feedbackUpdatedAt: feedback[insight.id]?.updatedAt || null
+  }));
+}
+
+function persistInsightFeedback(id, status) {
+  const paths = dataPaths();
+  return setFeedback(paths.feedback, id, status);
 }
 
 function currentFromLatest(latest) {
@@ -68,8 +115,9 @@ function currentFromLatest(latest) {
 function startApiServer() {
   const port = Number(process.env.WINDOW_OBSERVER_API_PORT) || 47821;
   apiServer = http.createServer((request, response) => {
-    if (request.method !== 'GET') {
-      sendJson(response, 405, { error: 'Method not allowed' }, { Allow: 'GET' });
+    const feedbackMatch = pathnameFor(request.url)?.match(/^\/api\/insights\/([^/]+)\/feedback$/);
+    if (request.method !== 'GET' && !(request.method === 'POST' && feedbackMatch)) {
+      sendJson(response, 405, { error: 'Method not allowed' }, { Allow: 'GET, POST' });
       return;
     }
     let pathname;
@@ -77,24 +125,46 @@ function startApiServer() {
       sendJson(response, 400, { error: 'Invalid request URL' });
       return;
     }
-    const paths = dataPaths();
+    if (request.method === 'POST' && feedbackMatch) {
+      readRequestBody(request).then((body) => {
+        const status = String(body.status || '').toLowerCase();
+        if (!['correct', 'expected', 'incorrect', 'ignore'].includes(status)) {
+          sendJson(response, 400, { error: 'Feedback status must be correct, expected, incorrect, or ignore' });
+          return;
+        }
+        const insightId = decodeURIComponent(feedbackMatch[1]);
+        const insights = insightsWithFeedback();
+        if (insights.error) { sendJson(response, 404, insights); return; }
+        if (!insights.some((insight) => insight.id === insightId)) {
+          sendJson(response, 404, { error: 'Insight not found' });
+          return;
+        }
+        sendJson(response, 200, { id: insightId, ...persistInsightFeedback(insightId, status) });
+      }).catch((error) => sendJson(response, 400, { error: error.message }));
+      return;
+    }
     if (pathname === '/api/activity') {
-      const activity = readApiJson(paths.activity, 'Activity');
-      if (activity.error) return sendJson(response, activity.error.endsWith('yet') ? 404 : 500, activity);
-      if (!Array.isArray(activity)) return sendJson(response, 500, { error: 'Activity data is malformed' });
-      return sendJson(response, 200, activity);
+      return sendJson(response, 200, getDataStore().getActivity());
     }
     if (pathname === '/api/current') {
-      const latest = readApiJson(paths.latest, 'Current snapshot');
-      if (latest.error) return sendJson(response, latest.error.endsWith('yet') ? 404 : 500, latest);
-      if (!latest || typeof latest !== 'object' || Array.isArray(latest)) return sendJson(response, 500, { error: 'Current snapshot data is malformed' });
+      const latest = getDataStore().getLatestSnapshot();
+      if (!latest) return sendJson(response, 404, { error: 'Current snapshot data is not available yet' });
       return sendJson(response, 200, currentFromLatest(latest));
     }
     if (pathname === '/api/summary') {
-      const activity = readApiJson(paths.activity, 'Activity');
-      if (activity.error) return sendJson(response, activity.error.endsWith('yet') ? 404 : 500, activity);
-      if (!Array.isArray(activity)) return sendJson(response, 500, { error: 'Activity data is malformed' });
-      return sendJson(response, 200, summarizeActivity(activity));
+      return sendJson(response, 200, getDataStore().getSummary());
+    }
+    if (pathname === '/api/insights') {
+      const insights = insightsWithFeedback();
+      if (insights.error) return sendJson(response, insights.error.endsWith('yet') ? 404 : 500, insights);
+      return sendJson(response, 200, insights);
+    }
+    const insightMatch = pathname.match(/^\/api\/insights\/([^/]+)$/);
+    if (insightMatch) {
+      const insights = insightsWithFeedback();
+      if (insights.error) return sendJson(response, 404, insights);
+      const insight = insights.find((item) => item.id === decodeURIComponent(insightMatch[1]));
+      return insight ? sendJson(response, 200, insight) : sendJson(response, 404, { error: 'Insight not found' });
     }
     sendJson(response, 404, { error: 'Not found' });
   });
@@ -102,18 +172,14 @@ function startApiServer() {
   apiServer.listen(port, '127.0.0.1', () => console.log(`Local API listening at http://127.0.0.1:${port}`));
 }
 
+function pathnameFor(requestUrl) {
+  try { return new URL(requestUrl, 'http://127.0.0.1').pathname; } catch { return null; }
+}
+
 function writeJson(file, value) {
   const temporary = `${file}.tmp`;
   fs.writeFileSync(temporary, JSON.stringify(value, null, 2));
   fs.renameSync(temporary, file);
-}
-
-function migrateActivityFile() {
-  const paths = dataPaths();
-  const activity = readJson(paths.activity, null);
-  if (!Array.isArray(activity)) return;
-  const migrated = activity.map(readableActivityEvent);
-  if (JSON.stringify(activity) !== JSON.stringify(migrated)) writeJson(paths.activity, migrated);
 }
 
 function jsWindowsOpenApps() {
@@ -226,20 +292,29 @@ function ensureRustCollector() {
 }
 
 function rustWindowsOpenApps() {
-  const collector = ensureRustCollector();
+  return rustCollectorCommand('capture', true);
+}
+
+function rustCollectorCommand(command, startIfMissing = false) {
+  const collector = startIfMissing ? ensureRustCollector() : rustCollector;
+  if (!collector || collector.killed) return Promise.resolve({ windows: [], activityEvents: [] });
   return new Promise((resolve, reject) => {
     if (rustPending.length >= 4) {
       reject(new Error('Rust collector request buffer is full'));
       return;
     }
     rustPending.push({ resolve, reject });
-    collector.stdin.write('capture\n', (error) => {
+    collector.stdin.write(`${command}\n`, (error) => {
       if (error) {
         const request = rustPending.pop();
         if (request) request.reject(error);
       }
     });
   });
+}
+
+function flushRustActivity() {
+  return rustCollectorCommand('flush');
 }
 
 function windowsOpenApps() {
@@ -293,29 +368,23 @@ async function captureSnapshot({ runId } = {}) {
   let activityEvents = [];
   try {
     const result = await windowsOpenApps();
-    // A pause can happen while the native collector is responding. Do not let
-    // that in-flight response write a snapshot after the observer was stopped.
-    if (runId !== undefined && (runId !== observerRunId || !observerState.running)) return observerState.lastSnapshot;
     windows = Array.isArray(result) ? result : result.windows;
     activityEvents = Array.isArray(result) ? [] : (result.activityEvents || []);
+    // A pause can happen while the native collector is responding. Do not let
+    // that in-flight response write a snapshot after the observer was stopped.
+    // Completed intervals are still durable activity data and must not be lost.
+    if (runId !== undefined && (runId !== observerRunId || !observerState.running)) {
+      getDataStore().enqueueActivity(activityEvents);
+      return observerState.lastSnapshot;
+    }
   } catch (error) {
     windows = [{ appName: 'Observer error', processName: '', title: error.message, processId: null, isForeground: false }];
   }
 
   const snapshot = { timestamp, platform: process.platform, windowCount: windows.length, windows, activityEvents };
-  const paths = dataPaths();
-  const latest = readJson(paths.latest, null);
-  if (activityEvents.length > 0) {
-    const activity = readJson(paths.activity, []);
-    activity.push(...activityEvents.map(readableActivityEvent));
-    writeJson(paths.activity, activity);
-  }
-  if (hasWindowSetChanged(latest, windows)) {
-    const history = readJson(paths.history, []);
-    history.push(snapshot);
-    writeJson(paths.history, history);
-  }
-  writeJson(paths.latest, snapshot);
+  const latest = observerState.lastSnapshot || getDataStore().getLatestSnapshot();
+  const changed = hasWindowSetChanged(latest, windows);
+  getDataStore().enqueueCapture(snapshot, changed, activityEvents);
   observerState.lastSnapshot = snapshot;
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('snapshot-updated', snapshot);
   return snapshot;
@@ -330,8 +399,8 @@ function runScheduledCapture() {
   });
 }
 
-function startObserver(intervalMs = observerState.intervalMs) {
-  stopObserver();
+async function startObserver(intervalMs = observerState.intervalMs) {
+  await stopObserver({ closeActivity: false });
   observerRunId += 1;
   observerState = { running: true, intervalMs: normalizeInterval(intervalMs), lastSnapshot: observerState.lastSnapshot };
   runScheduledCapture();
@@ -339,11 +408,22 @@ function startObserver(intervalMs = observerState.intervalMs) {
   return observerState;
 }
 
-function stopObserver() {
+async function flushActiveInterval() {
+  const result = await flushRustActivity();
+  const events = Array.isArray(result) ? [] : (result.activityEvents || []);
+  if (events.length) {
+    const store = getDataStore();
+    store.enqueueActivity(events);
+    store.flush();
+  }
+}
+
+async function stopObserver({ closeActivity = true } = {}) {
   observerRunId += 1;
   if (observerTimer) clearInterval(observerTimer);
   observerTimer = null;
   observerState.running = false;
+  if (closeActivity) await flushActiveInterval();
   return observerState;
 }
 
@@ -369,12 +449,28 @@ function registerIpcHandlers() {
   ipcMain.handle('observer:start', (_, interval) => startObserver(interval));
   ipcMain.handle('observer:stop', () => stopObserver());
   ipcMain.handle('observer:capture', captureSnapshot);
-  ipcMain.handle('observer:state', () => ({ ...observerState, latest: readJson(dataPaths().latest, null), history: readJson(dataPaths().history, []), activity: readJson(dataPaths().activity, []) }));
+  ipcMain.handle('observer:state', () => {
+    const store = getDataStore();
+    return {
+      ...observerState,
+      latest: observerState.lastSnapshot || store.getLatestSnapshot({ flush: false }),
+      history: store.getHistory({ flush: false }),
+      activity: store.getActivity({ flush: false })
+    };
+  });
   ipcMain.handle('observer:open-data', () => shell.openPath(dataPaths().directory));
   ipcMain.handle('observer:open-accessibility', openAccessibilitySettings);
   ipcMain.handle('observer:memory', getMemoryUsage);
+  ipcMain.handle('observer:insights', () => insightsWithFeedback());
+  ipcMain.handle('observer:feedback', (_, id, status) => {
+    const allowed = ['correct', 'expected', 'incorrect', 'ignore'];
+    if (!allowed.includes(status)) throw new Error('Invalid feedback status');
+    const insights = insightsWithFeedback();
+    if (insights.error || !insights.some((insight) => insight.id === id)) throw new Error('Insight not found');
+    return { id, ...persistInsightFeedback(id, status) };
+  });
   ipcMain.handle('agent:ask', (_, prompt) => askActivityAgent(prompt));
-  migrateActivityFile();
+  initializeDataStore();
   startApiServer();
   createWindow();
   startObserver();
@@ -388,6 +484,16 @@ async function runHeadlessSmokeTest() {
 
 if (process.versions.electron) {
   app.whenReady().then(process.env.WINDOW_OBSERVER_HEADLESS_TEST === '1' ? runHeadlessSmokeTest : registerIpcHandlers);
+  app.on('before-quit', (event) => {
+    if (quitFinalizationStarted) return;
+    event.preventDefault();
+    quitFinalizationStarted = true;
+    stopObserver().catch((error) => console.error(`Could not finish active interval: ${error.message}`)).finally(() => {
+      if (dataStore) dataStore.close();
+      shutdownRustCollector();
+      app.quit();
+    });
+  });
   app.on('will-quit', shutdownRustCollector);
   app.on('will-quit', () => { if (apiServer) apiServer.close(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

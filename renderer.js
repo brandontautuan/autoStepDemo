@@ -7,6 +7,27 @@ const durationText = (durationMs) => { const seconds = Math.max(0, Math.floor(Nu
 const activitySummary = (activity) => activity.reduce((result, item) => { const app = item.app || item.appName || 'Unknown app'; const durationMs = activityDurationMs(item); result.apps[app] = (result.apps[app] || 0) + durationMs; result.total += durationMs; return result; }, { apps: {}, total: 0 });
 const memoryText = (kilobytes) => { const megabytes = Number(kilobytes || 0) / 1024; return megabytes >= 1024 ? `${(megabytes / 1024).toFixed(2)} GB` : `${megabytes.toFixed(1)} MB`; };
 const memoryProcessLabel = (type) => ({ browser: 'Main process', renderer: 'Renderer', gpu: 'GPU', utility: 'Utility' }[type] || type);
+const moneyText = (value) => `$${Number(value || 0).toFixed(2)}`;
+function renderInsights(insights) {
+  const list = $('insightsList');
+  if (!Array.isArray(insights)) { list.innerHTML = '<div class="insights-state error-state">Could not load friction insights.</div>'; return; }
+  if (!insights.length) { list.innerHTML = '<div class="insights-state">No friction signals yet. Keep the observer running while you work.</div>'; return; }
+  list.innerHTML = insights.map((insight) => {
+    const metricParts = [];
+    if (insight.metrics.durationMs != null) metricParts.push(durationText(insight.metrics.durationMs));
+    if (insight.metrics.switchCount != null) metricParts.push(`${insight.metrics.switchCount} switches`);
+    if (insight.metrics.revisitCount != null) metricParts.push(`${insight.metrics.revisitCount} revisits`);
+    metricParts.push(moneyText(insight.metrics.estimatedCost));
+    const feedback = ['correct', 'expected', 'incorrect', 'ignore'];
+    return `<details class="insight-card ${escapeHtml(insight.status || '')}"><summary><div class="insight-summary"><span class="severity ${escapeHtml(insight.severity)}">${escapeHtml(insight.severity)}</span><div><strong>${escapeHtml(insight.title)}</strong><span>${escapeHtml(insight.description)}</span></div><b>${Math.round(insight.confidence * 100)}%</b></div></summary><div class="insight-body"><div class="insight-metrics">${metricParts.map((part) => `<span>${escapeHtml(part)}</span>`).join('')}</div><p class="insight-suggestion">${escapeHtml(insight.suggestion)}</p><div class="evidence-label">EVIDENCE · ${insight.evidence.length} interval${insight.evidence.length === 1 ? '' : 's'}</div><div class="insight-evidence">${insight.evidence.map((event) => `<div class="evidence-row"><div><strong>${escapeHtml(event.app)}</strong><span>${escapeHtml(event.windowTitle || 'Untitled window')}</span></div><time>${durationText(event.durationMs)}<br>${dateTime(event.start)}</time></div>`).join('')}</div><div class="feedback-row"><span>${insight.status ? `Marked ${escapeHtml(insight.status)}` : 'Was this useful?'}</span>${feedback.map((status) => `<button data-feedback="${status}" data-insight="${escapeHtml(insight.id)}" class="${insight.status === status ? 'selected' : ''}">${status[0].toUpperCase()}${status.slice(1)}</button>`).join('')}</div></div></details>`;
+  }).join('');
+  list.querySelectorAll('[data-feedback]').forEach((button) => button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    try { await window.observer.feedback(button.dataset.insight, button.dataset.feedback); await refreshInsights(); } catch (error) { button.closest('.insight-body').insertAdjacentHTML('beforeend', `<div class="insights-state error-state">${escapeHtml(error.message)}</div>`); } finally { button.disabled = false; }
+  }));
+}
+async function refreshInsights() { try { renderInsights(await window.observer.insights()); } catch (error) { renderInsights(null); } }
 function renderMemory(memory) {
   if (!memory) return;
   $('memoryTotal').textContent = memoryText(memory.totalWorkingSetKB);
@@ -71,7 +92,8 @@ if (navigator.platform.toLowerCase().includes('mac')) {
   $('permissionBanner').style.display = 'flex';
   $('openAccessibility').addEventListener('click', () => window.observer.openAccessibility());
 }
-window.observer.onSnapshot(() => refresh());
+window.observer.onSnapshot(() => { refresh(); refreshInsights(); });
 refresh();
+refreshInsights();
 refreshMemory();
 setInterval(refreshMemory, 2000);
