@@ -8,6 +8,7 @@ node_modules/
 dist/
 build/
 rust-collector/target/
-observer-data/*.json
+observer-data/*
+!observer-data/.gitkeep
 *.log
 .DS_Store
