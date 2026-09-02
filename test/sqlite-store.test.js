@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { DatabaseSync } = require('node:sqlite');
 const { SqliteStore } = require('../sqlite-store');
 
 function temporaryDirectory() {
@@ -32,6 +33,7 @@ test('batches captures, returns canonical activity, and reconstructs snapshots',
     end: '2026-08-30T19:34:28.608Z',
     durationMs: 9975,
     app: 'Terminal',
+    source: 'js-fallback',
     windowTitle: 'autoStepDemo — -zsh — 80×24',
     process: { id: 950, name: 'Terminal', path: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal' }
   }]);
@@ -47,6 +49,7 @@ test('batches captures, returns canonical activity, and reconstructs snapshots',
     normalizedApp: 'terminal',
     windowTitle: 'autoStepDemo — -zsh — 80×24',
     normalizedTitle: 'autoStepDemo — zsh',
+    source: 'js-fallback',
     domain: null,
     action: null,
     process: { id: 950, name: 'Terminal', path: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal' }
@@ -79,5 +82,33 @@ test('imports legacy JSON once without deleting it', () => {
   const reopened = new SqliteStore(directory).initialize();
   assert.equal(reopened.getActivity().length, 1);
   reopened.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('upgrades a version-one database to preserve activity sources', () => {
+  const directory = temporaryDirectory();
+  const database = new DatabaseSync(path.join(directory, 'observer.sqlite'));
+  database.exec(`
+    CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO metadata (key, value) VALUES ('schema_version', '1');
+    CREATE TABLE activity_intervals (
+      id INTEGER PRIMARY KEY, start_at TEXT NOT NULL, end_at TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL, app_name TEXT NOT NULL, normalized_app TEXT NOT NULL,
+      window_title TEXT NOT NULL DEFAULT '', normalized_title TEXT NOT NULL DEFAULT '',
+      domain TEXT, action TEXT, process_id INTEGER, process_name TEXT NOT NULL DEFAULT '',
+      process_path TEXT NOT NULL DEFAULT '', UNIQUE(start_at, end_at, app_name, window_title, process_id)
+    );
+  `);
+  database.close();
+
+  const store = new SqliteStore(directory).initialize();
+  store.enqueueActivity([{
+    start: '2026-09-02T10:00:00.000Z', end: '2026-09-02T10:00:05.000Z', durationMs: 5000,
+    app: 'Terminal', windowTitle: 'Shell', process: { id: 1, name: 'Terminal', path: '/Terminal' }, source: 'js-fallback'
+  }]);
+  store.flush();
+  assert.equal(store.metadata('schema_version'), '2');
+  assert.equal(store.getActivity()[0].source, 'js-fallback');
+  store.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });

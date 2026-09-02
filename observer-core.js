@@ -53,6 +53,7 @@ function readableActivityEvent(event = {}) {
     normalizedApp: event.normalizedApp || normalizeAppName(app),
     windowTitle,
     normalizedTitle: event.normalizedTitle || normalizeWindowTitle(windowTitle),
+    source: event.source || 'rust-collector',
     domain: event.domain ?? null,
     action: event.action ?? null,
     process: {

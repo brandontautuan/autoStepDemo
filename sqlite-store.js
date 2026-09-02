@@ -3,7 +3,7 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { readableActivityEvent, summarizeActivity } = require('./observer-core');
 
-const SCHEMA_VERSION = '1';
+const SCHEMA_VERSION = '2';
 const DEFAULT_FLUSH_MS = 1000;
 const DEFAULT_MAX_QUEUE_SIZE = 50;
 
@@ -83,6 +83,7 @@ class SqliteStore {
         normalized_title TEXT NOT NULL DEFAULT '',
         domain TEXT,
         action TEXT,
+        source TEXT NOT NULL DEFAULT 'legacy-json',
         process_id INTEGER,
         process_name TEXT NOT NULL DEFAULT '',
         process_path TEXT NOT NULL DEFAULT '',
@@ -98,6 +99,13 @@ class SqliteStore {
       throw new Error(`Observer database schema ${schemaVersion} is newer than this app supports`);
     }
     if (!schemaVersion) this.setMetadata('schema_version', SCHEMA_VERSION);
+    if (schemaVersion === '1') {
+      const columns = this.db.prepare('PRAGMA table_info(activity_intervals)').all();
+      if (!columns.some((column) => column.name === 'source')) {
+        this.db.exec("ALTER TABLE activity_intervals ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy-json'");
+      }
+      this.setMetadata('schema_version', SCHEMA_VERSION);
+    }
     this.importLegacyJsonOnce();
     return this;
   }
@@ -119,7 +127,7 @@ class SqliteStore {
     try {
       if (Array.isArray(history)) history.forEach((snapshot) => this.insertSnapshot(snapshot, true));
       if (latest && typeof latest === 'object' && !Array.isArray(latest)) this.insertSnapshot(latest, false);
-      if (Array.isArray(activity)) activity.forEach((event) => this.insertActivity(event));
+      if (Array.isArray(activity)) activity.forEach((event) => this.insertActivity({ ...event, source: event.source || 'legacy-json' }));
       this.setMetadata('legacy_json_imported_at', new Date().toISOString());
       this.db.exec('COMMIT');
     } catch (error) {
@@ -212,12 +220,12 @@ class SqliteStore {
     this.db.prepare(`
       INSERT INTO activity_intervals (
         start_at, end_at, duration_ms, app_name, normalized_app, window_title,
-        normalized_title, domain, action, process_id, process_name, process_path
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        normalized_title, domain, action, source, process_id, process_name, process_path
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(start_at, end_at, app_name, window_title, process_id) DO NOTHING
     `).run(
       event.start, event.end, event.durationMs, event.app, event.normalizedApp,
-      event.windowTitle, event.normalizedTitle, event.domain, event.action,
+      event.windowTitle, event.normalizedTitle, event.domain, event.action, event.source,
       numberOrNull(event.process.id), event.process.name, event.process.path
     );
   }
@@ -278,7 +286,7 @@ class SqliteStore {
     if (flush) this.flush(); else this.initialize();
     return this.db.prepare(`
       SELECT start_at, end_at, duration_ms, app_name, normalized_app, window_title,
-        normalized_title, domain, action, process_id, process_name, process_path
+        normalized_title, domain, action, source, process_id, process_name, process_path
       FROM activity_intervals
       ORDER BY start_at ASC, id ASC
     `).all().map((row) => ({
@@ -291,6 +299,7 @@ class SqliteStore {
       normalizedTitle: row.normalized_title,
       domain: row.domain,
       action: row.action,
+      source: row.source,
       process: { id: row.process_id, name: row.process_name, path: row.process_path }
     }));
   }

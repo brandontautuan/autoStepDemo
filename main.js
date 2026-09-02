@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { cleanWindow, normalizeInterval, hasWindowSetChanged } = require('./observer-core');
 const { SqliteStore } = require('./sqlite-store');
-const { generateInsights } = require('./insights');
+const { generateInsights, applyFeedback } = require('./insights');
 const { readFeedback, setFeedback } = require('./feedback');
 
 let mainWindow;
@@ -20,6 +20,61 @@ let apiServer;
 let dataStore;
 let quitFinalizationStarted = false;
 let observerState = { running: false, intervalMs: 10000, lastSnapshot: null };
+
+class JsFallbackActivityState {
+  constructor(now = () => new Date()) {
+    this.now = now;
+    this.activeWindow = null;
+    this.activeSince = null;
+  }
+
+  sameWindow(previous, next) {
+    if (!previous || !next) return false;
+    return previous.appName === next.appName
+      && (previous.windowTitle || previous.title || '') === (next.windowTitle || next.title || '')
+      && (Number(previous.processId) || null) === (Number(next.processId) || null);
+  }
+
+  eventFor(window, start, end) {
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      durationMs: Math.max(0, end.getTime() - start.getTime()),
+      app: window.appName || 'Unknown app',
+      windowTitle: window.windowTitle || window.title || '',
+      process: {
+        id: Number(window.processId) || null,
+        name: window.processName || '',
+        path: window.executablePath || window.path || ''
+      },
+      source: 'js-fallback'
+    };
+  }
+
+  update(windows, now = this.now()) {
+    const nextWindow = (windows || []).find((window) => window.isForeground) || null;
+    if (this.sameWindow(this.activeWindow, nextWindow)
+      || (!this.activeWindow && !nextWindow)) return [];
+
+    const events = [];
+    if (this.activeWindow && this.activeSince) {
+      events.push(this.eventFor(this.activeWindow, this.activeSince, now));
+    }
+    this.activeWindow = nextWindow;
+    this.activeSince = nextWindow ? now : null;
+    return events;
+  }
+
+  flush(now = this.now()) {
+    if (!this.activeWindow || !this.activeSince) return [];
+    const event = this.eventFor(this.activeWindow, this.activeSince, now);
+    this.activeWindow = null;
+    this.activeSince = null;
+    return [event];
+  }
+}
+
+const jsFallbackActivity = new JsFallbackActivityState();
 
 function dataPaths() {
   // Keep `npm start` data visible in the repository. Packaged apps use the
@@ -85,11 +140,7 @@ function insightsWithFeedback() {
   const paths = dataPaths();
   const activity = getDataStore().getActivity();
   const feedback = readFeedback(paths.feedback);
-  return generateInsights(activity).map((insight) => ({
-    ...insight,
-    status: feedback[insight.id]?.status || null,
-    feedbackUpdatedAt: feedback[insight.id]?.updatedAt || null
-  }));
+  return applyFeedback(generateInsights(activity), feedback);
 }
 
 function persistInsightFeedback(id, status) {
@@ -217,7 +268,7 @@ function jsWindowsOpenApps() {
       return;
     }
     if (process.platform !== 'win32') {
-      resolve([{ appName: 'Demo mode', processName: process.platform, title: 'Run this app on Windows to observe windows', processId: process.pid, isForeground: true }]);
+      resolve([cleanWindow({ appName: 'Demo mode', processName: process.platform, title: 'Run this app on Windows to observe windows', processId: process.pid, isForeground: true })]);
       return;
     }
 
@@ -276,7 +327,7 @@ function ensureRustCollector() {
         const response = JSON.parse(line);
         request.resolve({
           windows: (response.windows || []).map(cleanWindow),
-          activityEvents: response.activityEvents || []
+          activityEvents: (response.activityEvents || []).map((event) => ({ ...event, source: 'rust-collector' }))
         });
       } catch (error) { request.reject(error); }
     }
@@ -319,10 +370,12 @@ function flushRustActivity() {
 
 function windowsOpenApps() {
   const collector = process.env.WINDOW_OBSERVER_COLLECTOR || (process.platform === 'darwin' ? 'rust' : 'js');
-  if (collector !== 'rust') return jsWindowsOpenApps();
+  if (collector !== 'rust') {
+    return jsWindowsOpenApps().then((windows) => ({ windows, activityEvents: jsFallbackActivity.update(windows, new Date()) }));
+  }
   return rustWindowsOpenApps().catch((error) => {
     console.error(`Rust collector unavailable; using JavaScript fallback: ${error.message}`);
-    return jsWindowsOpenApps();
+    return jsWindowsOpenApps().then((windows) => ({ windows, activityEvents: jsFallbackActivity.update(windows, new Date()) }));
   });
 }
 
@@ -409,8 +462,14 @@ async function startObserver(intervalMs = observerState.intervalMs) {
 }
 
 async function flushActiveInterval() {
-  const result = await flushRustActivity();
-  const events = Array.isArray(result) ? [] : (result.activityEvents || []);
+  const events = [];
+  try {
+    const result = await flushRustActivity();
+    if (!Array.isArray(result)) events.push(...(result.activityEvents || []));
+  } catch (error) {
+    console.error(`Could not flush Rust activity: ${error.message}`);
+  }
+  events.push(...jsFallbackActivity.flush());
   if (events.length) {
     const store = getDataStore();
     store.enqueueActivity(events);
@@ -499,4 +558,4 @@ if (process.versions.electron) {
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }
 
-module.exports = { cleanWindow, normalizeInterval, hasWindowSetChanged, readJson, writeJson, windowsOpenApps, openAccessibilitySettings, currentFromLatest, askActivityAgent, startObserver, stopObserver };
+module.exports = { cleanWindow, normalizeInterval, hasWindowSetChanged, readJson, writeJson, windowsOpenApps, openAccessibilitySettings, currentFromLatest, askActivityAgent, startObserver, stopObserver, JsFallbackActivityState };

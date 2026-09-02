@@ -3,10 +3,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { generateInsights, normalizeActivity, estimatedCost } = require('../insights');
+const { generateInsights, normalizeActivity, confidenceLabel, applyFeedback } = require('../insights');
 const { readFeedback, setFeedback } = require('../feedback');
 
-const record = (start, app, title, durationMs, extra = {}) => ({
+const record = (start, app, title = app, durationMs = 30000, extra = {}) => ({
   start: new Date(start).toISOString(),
   end: new Date(new Date(start).getTime() + durationMs).toISOString(),
   app, windowTitle: title, durationMs, ...extra
@@ -24,42 +24,86 @@ test('normalizes legacy and canonical records and sorts malformed data out', () 
   assert.equal(result[0].process.id, 2);
 });
 
-test('detects long focus intervals and calculates cost', () => {
-  const insights = generateInsights([record('2026-08-30T10:00:00Z', 'Code', 'Draft', 120000)], {
-    hourlyRate: 90, thresholds: { longFocusMs: 60000 }
-  });
-  const insight = insights.find((item) => item.type === 'long_focus_interval');
-  assert.equal(insight.metrics.durationMs, 120000);
-  assert.equal(insight.metrics.estimatedCost, 3);
-  assert.equal(insight.evidence.length, 1);
-});
-
-test('detects a context switch burst with all evidence intervals', () => {
+test('merges overlapping context-switch candidate windows into one explainable burst', () => {
   const start = Date.parse('2026-08-30T10:00:00Z');
-  const activity = ['Code', 'Safari', 'Terminal', 'Code'].map((app, index) => record(start + index * 60000, app, app, 30000));
+  const activity = ['Code', 'Safari', 'Terminal', 'Code', 'Safari', 'Terminal']
+    .map((app, index) => record(start + index * 60000, app));
   const insights = generateInsights(activity, { thresholds: { switchBurstCount: 2, switchBurstWindowMs: 10 * 60000 } });
-  const insight = insights.find((item) => item.type === 'context_switch_burst');
-  assert.equal(insight.metrics.switchCount, 3);
-  assert.equal(insight.evidence.length, 4);
+  const bursts = insights.filter((item) => item.type === 'context_switch_burst');
+  assert.equal(bursts.length, 1);
+  assert.equal(bursts[0].title, 'Frequent app switching');
+  assert.equal(bursts[0].metrics.foregroundChanges, 5);
+  assert.match(bursts[0].summary, /^5 foreground changes in /);
+  assert.equal(bursts[0].evidenceDetails.distinctApps.length, 3);
+  assert.equal(bursts[0].evidence.length, 6);
 });
 
-test('detects repeated revisits to the same app and title', () => {
+test('keeps separate context-switch bursts when their candidate windows are far apart', () => {
   const start = Date.parse('2026-08-30T10:00:00Z');
-  const activity = [0, 2, 4].map((minutes) => record(start + minutes * 60000, 'Support', 'Ticket 123', 30000));
+  const firstBurst = ['Code', 'Safari', 'Terminal'].map((app, index) => record(start + index * 60000, app));
+  const secondBurst = ['Code', 'Safari', 'Terminal'].map((app, index) => record(start + (60 + index) * 60000, app));
+  const bursts = generateInsights([...firstBurst, ...secondBurst], { thresholds: { switchBurstCount: 2, switchBurstWindowMs: 10 * 60000 } })
+    .filter((item) => item.type === 'context_switch_burst');
+  assert.equal(bursts.length, 2);
+});
+
+test('long focus is a neutral work pattern, not high friction', () => {
+  const insights = generateInsights([record('2026-08-30T10:00:00Z', 'Code', 'Draft', 120000)], { thresholds: { longFocusMs: 60000 } });
+  const insight = insights.find((item) => item.type === 'long_focus_block');
+  assert.equal(insight.title, 'Long focus block in Code');
+  assert.equal(insight.category, 'work_pattern');
+  assert.equal(insight.signalLabel, 'Work pattern');
+  assert.equal(insight.metrics.durationMs, 120000);
+});
+
+test('repeated returns require interruptions between visits', () => {
+  const start = Date.parse('2026-08-30T10:00:00Z');
+  const activity = [
+    record(start, 'Support', 'Ticket 123'),
+    record(start + 60000, 'Browser', 'Documentation'),
+    record(start + 2 * 60000, 'Support', 'Ticket 123'),
+    record(start + 3 * 60000, 'Terminal', 'npm test'),
+    record(start + 4 * 60000, 'Support', 'Ticket 123')
+  ];
   const insight = generateInsights(activity, { thresholds: { revisitCount: 3, revisitWindowMs: 10 * 60000 } }).find((item) => item.type === 'repeated_revisit');
   assert.equal(insight.metrics.revisitCount, 2);
-  assert.equal(insight.evidence.length, 3);
+  assert.equal(insight.metrics.interruptionCount, 2);
+  assert.equal(insight.evidence.length, 5);
+});
+
+test('confidence uses explainable text labels rather than percentages', () => {
+  assert.equal(confidenceLabel(0.81), 'Strong evidence');
+  assert.equal(confidenceLabel(0.65), 'Moderate evidence');
+  assert.equal(confidenceLabel(0.59), 'Weak signal');
+  const insight = generateInsights([record('2026-08-30T10:00:00Z', 'Code', 'Draft', 120000)], { thresholds: { longFocusMs: 60000 } })[0];
+  assert.doesNotMatch(insight.confidenceLabel, /%/);
+});
+
+test('switch count means foreground changes, not distinct apps', () => {
+  const start = Date.parse('2026-08-30T10:00:00Z');
+  const activity = ['Code', 'Safari', 'Code', 'Safari'].map((app, index) => record(start + index * 60000, app));
+  const insight = generateInsights(activity, { thresholds: { switchBurstCount: 2, switchBurstWindowMs: 10 * 60000 } })
+    .find((item) => item.type === 'context_switch_burst');
+  assert.equal(insight.metrics.foregroundChanges, 3);
+  assert.equal(insight.metrics.distinctApps, 2);
+});
+
+test('feedback persists and lowers ignored or expected signals in ranking', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'friction-feedback-'));
+  const file = path.join(directory, 'feedback.json');
+  setFeedback(file, 'insight-1', 'ignore', '2026-08-30T10:00:00Z');
+  const feedback = readFeedback(file);
+  assert.deepEqual(feedback, { 'insight-1': { status: 'ignore', updatedAt: '2026-08-30T10:00:00Z' } });
+  const ranked = applyFeedback([
+    { id: 'insight-1', rank: 300, confidence: 0.9, signalLabel: 'Needs review' },
+    { id: 'insight-2', rank: 200, confidence: 0.8, signalLabel: 'Possible friction' }
+  ], feedback);
+  assert.deepEqual(ranked.map((item) => item.id), ['insight-2', 'insight-1']);
+  assert.equal(ranked[1].signalLabel, 'Dismissed');
+  assert.equal(ranked[1].status, 'ignore');
 });
 
 test('handles empty and malformed activity safely', () => {
   assert.deepEqual(generateInsights(null), []);
   assert.deepEqual(generateInsights([{ app: 'Unknown', durationMs: 'nope' }, {}]), []);
-  assert.equal(estimatedCost(3600000, 60), 60);
-});
-
-test('persists and reloads insight feedback', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'friction-feedback-'));
-  const file = path.join(directory, 'feedback.json');
-  setFeedback(file, 'insight-1', 'correct', '2026-08-30T10:00:00Z');
-  assert.deepEqual(readFeedback(file), { 'insight-1': { status: 'correct', updatedAt: '2026-08-30T10:00:00Z' } });
 });

@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const { escapeHtml } = require('../renderer-utils');
 
 function activitySummary(activity) {
@@ -26,4 +28,10 @@ test('dashboard activity summary groups durations by app', () => {
     { appName: 'Safari', durationMs: 30000 },
     { appName: 'Code', durationMs: 45000 },
   ]), { apps: { Code: 165000, Safari: 30000 }, total: 195000 });
+});
+
+test('insight cards render confidence as an evidence label, never a percentage', () => {
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+  assert.match(renderer, /insight\.confidenceLabel/);
+  assert.doesNotMatch(renderer, /Math\.round\(insight\.confidence \* 100\)/);
 });

@@ -48,6 +48,7 @@ test('readableActivityEvent emits the canonical interval schema', () => {
     normalizedApp: 'terminal',
     windowTitle: 'autoStepDemo — -zsh — 80×24',
     normalizedTitle: 'autoStepDemo — zsh',
+    source: 'rust-collector',
     domain: null,
     action: null,
     process: { id: 42, name: 'Terminal', path: '/Applications/Utilities/Terminal.app' }
