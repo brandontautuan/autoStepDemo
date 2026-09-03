@@ -42,6 +42,7 @@ test('batches captures, returns canonical activity, and reconstructs snapshots',
   assert.equal(store.getHistory().length, 1);
   assert.equal(store.getLatestSnapshot().timestamp, '2026-08-30T19:34:28.608Z');
   assert.deepEqual(store.getActivity(), [{
+    id: 1,
     start: '2026-08-30T19:34:18.633Z',
     end: '2026-08-30T19:34:28.608Z',
     durationMs: 9975,
@@ -109,6 +110,22 @@ test('upgrades a version-one database to preserve activity sources', () => {
   store.flush();
   assert.equal(store.metadata('schema_version'), '2');
   assert.equal(store.getActivity()[0].source, 'js-fallback');
+  store.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('drops activity intervals with invalid timestamps or durations before storage', () => {
+  const directory = temporaryDirectory();
+  const store = new SqliteStore(directory).initialize();
+  store.enqueueActivity([
+    null,
+    { start: 'not-a-time', end: '2026-09-02T10:00:05.000Z', durationMs: 5000, app: 'Code' },
+    { start: '2026-09-02T10:00:05.000Z', end: '2026-09-02T10:00:00.000Z', durationMs: 5000, app: 'Code' },
+    { start: '2026-09-02T10:00:00.000Z', end: '2026-09-02T10:00:05.000Z', durationMs: 'not-a-duration', app: 'Code' },
+    { start: '2026-09-02T10:00:00.000Z', end: '2026-09-02T10:00:05.000Z', durationMs: 5000, app: 'Code', source: 'js-fallback' }
+  ]);
+  store.flush();
+  assert.deepEqual(store.getActivity().map((event) => ({ app: event.app, source: event.source })), [{ app: 'Code', source: 'js-fallback' }]);
   store.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });

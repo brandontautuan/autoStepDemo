@@ -16,6 +16,20 @@ function numberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function validActivityInterval(rawEvent, event) {
+  rawEvent = rawEvent && typeof rawEvent === 'object' ? rawEvent : {};
+  const rawDurationMs = rawEvent.durationMs != null
+    ? Number(rawEvent.durationMs)
+    : (rawEvent.duration != null ? Number(rawEvent.duration) * 1000 : null);
+  const startMs = Date.parse(event.start);
+  const endMs = Date.parse(event.end);
+  return Number.isFinite(rawDurationMs)
+    && rawDurationMs >= 0
+    && Number.isFinite(startMs)
+    && Number.isFinite(endMs)
+    && endMs >= startMs;
+}
+
 function cleanSnapshot(snapshot = {}) {
   const windows = Array.isArray(snapshot.windows) ? snapshot.windows : [];
   return {
@@ -138,14 +152,15 @@ class SqliteStore {
 
   enqueueCapture(snapshot, changed, activityEvents = []) {
     this.initialize();
-    this.pending.push({ snapshot: cleanSnapshot(snapshot), changed: Boolean(changed), activityEvents: activityEvents.map(readableActivityEvent) });
+    const events = Array.isArray(activityEvents) ? activityEvents.filter((event) => event && typeof event === 'object') : [];
+    this.pending.push({ snapshot: cleanSnapshot(snapshot), changed: Boolean(changed), activityEvents: events });
     if (this.pending.length >= this.maxQueueSize) this.flush();
     else this.scheduleFlush();
   }
 
   enqueueActivity(activityEvents = []) {
     this.initialize();
-    const events = activityEvents.map(readableActivityEvent);
+    const events = Array.isArray(activityEvents) ? activityEvents.filter((event) => event && typeof event === 'object') : [];
     if (!events.length) return;
     this.pending.push({ snapshot: null, changed: false, activityEvents: events });
     if (this.pending.length >= this.maxQueueSize) this.flush();
@@ -216,7 +231,7 @@ class SqliteStore {
 
   insertActivity(value) {
     const event = readableActivityEvent(value);
-    if (!event.start || !event.end) return;
+    if (!validActivityInterval(value, event)) return false;
     this.db.prepare(`
       INSERT INTO activity_intervals (
         start_at, end_at, duration_ms, app_name, normalized_app, window_title,
@@ -228,6 +243,7 @@ class SqliteStore {
       event.windowTitle, event.normalizedTitle, event.domain, event.action, event.source,
       numberOrNull(event.process.id), event.process.name, event.process.path
     );
+    return true;
   }
 
   getLatestSnapshot({ flush = true } = {}) {
@@ -285,11 +301,12 @@ class SqliteStore {
   getActivity({ flush = true } = {}) {
     if (flush) this.flush(); else this.initialize();
     return this.db.prepare(`
-      SELECT start_at, end_at, duration_ms, app_name, normalized_app, window_title,
+      SELECT id, start_at, end_at, duration_ms, app_name, normalized_app, window_title,
         normalized_title, domain, action, source, process_id, process_name, process_path
       FROM activity_intervals
       ORDER BY start_at ASC, id ASC
     `).all().map((row) => ({
+      id: row.id,
       start: row.start_at,
       end: row.end_at,
       durationMs: row.duration_ms,
@@ -335,4 +352,4 @@ class SqliteStore {
   }
 }
 
-module.exports = { SqliteStore, readJson, DEFAULT_FLUSH_MS, DEFAULT_MAX_QUEUE_SIZE };
+module.exports = { SqliteStore, readJson, validActivityInterval, DEFAULT_FLUSH_MS, DEFAULT_MAX_QUEUE_SIZE };

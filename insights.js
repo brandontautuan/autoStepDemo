@@ -36,7 +36,7 @@ function normalizeActivityRecord(record = {}, sourceIndex = 0) {
   const end = parseTimestamp(record.end || record.timestamp);
   const start = parseTimestamp(record.start) || (end ? new Date(end.getTime() - durationMs) : null);
   const resolvedEnd = end || (start ? new Date(start.getTime() + durationMs) : null);
-  if (!start || !resolvedEnd) return null;
+  if (!start || !resolvedEnd || resolvedEnd.getTime() < start.getTime()) return null;
   return {
     start: start.toISOString(), end: resolvedEnd.toISOString(), startMs: start.getTime(), endMs: resolvedEnd.getTime(),
     durationMs: Math.max(0, Math.round(durationMs)), app, normalizedApp: normalizeApp(record.normalizedApp || app),
@@ -44,7 +44,8 @@ function normalizeActivityRecord(record = {}, sourceIndex = 0) {
     process: record.process && typeof record.process === 'object'
       ? { id: numberOrNull(record.process.id), name: String(record.process.name || ''), path: String(record.process.path || '') }
       : { id: numberOrNull(record.processId), name: String(record.processName || ''), path: String(record.path || record.executablePath || '') },
-    sourceIndex
+    sourceIndex,
+    intervalId: record.intervalId ?? record.id ?? `input:${sourceIndex}`
   };
 }
 
@@ -116,19 +117,47 @@ function insightBase({ id, type, category, title, summary, description, whyItMay
 }
 
 function detectLongFocusBlocks(records, thresholds) {
-  return records.filter((record) => record.durationMs >= thresholds.longFocusMs).map((record) => {
+  const qualifying = records.filter((record) => record.durationMs >= thresholds.longFocusMs);
+  const repeatedByApp = new Map();
+  qualifying.forEach((record) => {
+    const items = repeatedByApp.get(record.normalizedApp) || [];
+    items.push(record);
+    repeatedByApp.set(record.normalizedApp, items);
+  });
+  const groupedApps = new Set([...repeatedByApp.entries()].filter(([, items]) => items.length >= 3).map(([app]) => app));
+  const insights = [];
+  repeatedByApp.forEach((items, app) => {
+    if (!groupedApps.has(app)) return;
+    const totalDurationMs = items.reduce((total, item) => total + item.durationMs, 0);
+    const titles = [...new Set(items.map((item) => item.windowTitle || 'Untitled window'))];
+    const titleContext = titles.slice(0, 2).join('; ');
+    const evidence = items;
+    insights.push(insightBase({
+      id: `long-focus-group-${app}-${items[0].startMs}`,
+      type: 'long_focus_block', category: 'work_pattern', title: `Focus blocks in ${items[0].app}`,
+      summary: `${items.length} focus blocks totaling ${roundedMinutes(totalDurationMs)} minutes${titleContext ? ` · ${titleContext}${titles.length > 2 ? '…' : ''}` : ''}`,
+      description: `${items[0].app} had ${items.length} completed focus blocks totaling ${roundedMinutes(totalDurationMs)} minutes. The captured titles provide context for what was open; this is a neutral work pattern, not friction.`,
+      whyItMayMatter: 'It provides a compact view of sustained work across several completed foreground intervals.',
+      whyItMayBeNormal: 'Several focus blocks in the same app commonly reflect normal, sustained work.',
+      confidence: 0.75, impact: 'low', evidence, details: evidenceDetails(evidence, { focusBlockCount: items.length, focusTitles: titles }),
+      metrics: { durationMs: totalDurationMs, distinctApps: 1, focusBlockCount: items.length }, rank: 50
+    }));
+  });
+  qualifying.filter((record) => !groupedApps.has(record.normalizedApp)).forEach((record) => {
     const evidence = [record];
-    return insightBase({
+    const titleContext = record.windowTitle ? ` — ${record.windowTitle}` : '';
+    insights.push(insightBase({
       id: `long-focus-${record.startMs}-${record.sourceIndex}`,
-      type: 'long_focus_block', category: 'work_pattern', title: `Long focus block in ${record.app}`,
-      summary: `${record.app} stayed in the foreground for ${roundedMinutes(record.durationMs)} minutes`,
-      description: `${record.app} remained in the foreground for ${roundedMinutes(record.durationMs)} minutes. This often reflects focused work rather than friction.`,
+      type: 'long_focus_block', category: 'work_pattern', title: `Long focus block in ${record.app}${titleContext}`,
+      summary: `${record.app} stayed in the foreground for ${roundedMinutes(record.durationMs)} minutes${record.windowTitle ? ` · ${record.windowTitle}` : ''}`,
+      description: `${record.app}${record.windowTitle ? ` — ${record.windowTitle}` : ''} remained in the foreground for ${roundedMinutes(record.durationMs)} minutes. This often reflects focused work rather than friction.`,
       whyItMayMatter: 'It is useful context if it is later interrupted or repeatedly restarted, but it is not a problem on its own.',
       whyItMayBeNormal: 'A sustained foreground block can simply mean you were concentrating on one task.',
       confidence: 0.7, impact: 'low', evidence, details: evidenceDetails(evidence),
       metrics: { durationMs: record.durationMs, distinctApps: 1 }, rank: 50
-    });
+    }));
   });
+  return insights;
 }
 
 function switchCandidates(records, thresholds) {
@@ -257,7 +286,10 @@ function applyFeedback(insights, feedback = {}) {
     const status = entry?.status || null;
     if (!status) return insight;
     if (status === 'ignore') return { ...insight, status, feedbackUpdatedAt: entry.updatedAt || null, signalLabel: 'Dismissed', rank: insight.rank - 10000 };
-    if (status === 'expected') return { ...insight, status, feedbackUpdatedAt: entry.updatedAt || null, signalLabel: 'Work pattern', rank: insight.rank - 500 };
+    // "Expected" is feedback about a friction signal, not a reclassification of
+    // that signal into a neutral work pattern. Keep its label/category intact
+    // and only lower its rank.
+    if (status === 'expected') return { ...insight, status, feedbackUpdatedAt: entry.updatedAt || null, rank: insight.rank - 500 };
     if (status === 'incorrect') return { ...insight, status, feedbackUpdatedAt: entry.updatedAt || null, rank: insight.rank - 250 };
     return { ...insight, status, feedbackUpdatedAt: entry.updatedAt || null };
   }).sort((a, b) => b.rank - a.rank || b.confidence - a.confidence || a.id.localeCompare(b.id));

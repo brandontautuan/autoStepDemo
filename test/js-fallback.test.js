@@ -49,6 +49,15 @@ test('JS fallback flush closes the active interval exactly once', () => {
   assert.deepEqual(state.flush(time(8)), []);
 });
 
+test('JS fallback exposes the active foreground interval for live dashboard display', () => {
+  const state = new JsFallbackActivityState();
+  state.update([window('Code', 'Draft', 10)], time(0));
+  const current = state.current(time(7));
+  assert.equal(current.durationMs, 7000);
+  assert.equal(current.windowTitle, 'Draft');
+  assert.equal(current.source, 'live');
+});
+
 test('JS fallback intervals persist through the normal store and feed summaries and insights', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'js-fallback-store-'));
   const state = new JsFallbackActivityState();

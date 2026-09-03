@@ -35,3 +35,20 @@ test('insight cards render confidence as an evidence label, never a percentage',
   assert.match(renderer, /insight\.confidenceLabel/);
   assert.doesNotMatch(renderer, /Math\.round\(insight\.confidence \* 100\)/);
 });
+
+test('UI exposes intentional loading, empty, error, and degraded-collector states', () => {
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+  const markup = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(renderer, /No work signals yet/);
+  assert.match(renderer, /Could not load friction insights/);
+  assert.match(renderer, /Observer degraded/);
+  assert.match(renderer, /Window Observer is excluded from capture/);
+  assert.match(markup, /id="collectorWarning"/);
+});
+
+test('observer controls refresh complete stored state instead of rendering an incomplete start/stop response', () => {
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+  assert.match(renderer, /if \(state\.running\) await window\.observer\.stop\(\);/);
+  assert.match(renderer, /await refresh\(\);/);
+  assert.doesNotMatch(renderer, /render\(state\.running \? await window\.observer\.stop\(\)/);
+});

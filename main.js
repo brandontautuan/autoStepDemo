@@ -1,13 +1,14 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const { execFile, spawn } = require('child_process');
 const http = require('http');
-const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
 const { cleanWindow, normalizeInterval, hasWindowSetChanged } = require('./observer-core');
 const { SqliteStore } = require('./sqlite-store');
 const { generateInsights, applyFeedback } = require('./insights');
+const { buildPersonalDashboard } = require('./personal-dashboard');
 const { readFeedback, setFeedback } = require('./feedback');
+const { createLocalApiHandler } = require('./local-api');
 
 let mainWindow;
 let observerTimer;
@@ -19,7 +20,18 @@ let observerRunId = 0;
 let apiServer;
 let dataStore;
 let quitFinalizationStarted = false;
-let observerState = { running: false, intervalMs: 10000, lastSnapshot: null };
+let observerState = {
+  running: false,
+  intervalMs: 10000,
+  lastSnapshot: null,
+  collectorMode: null,
+  collectorWarning: null,
+  collectorDegraded: false,
+  lastCaptureError: null,
+  lastSuccessfulCaptureAt: null
+};
+
+const hasSingleInstanceLock = !process.versions.electron || app.requestSingleInstanceLock();
 
 class JsFallbackActivityState {
   constructor(now = () => new Date()) {
@@ -35,7 +47,7 @@ class JsFallbackActivityState {
       && (Number(previous.processId) || null) === (Number(next.processId) || null);
   }
 
-  eventFor(window, start, end) {
+  eventFor(window, start, end, source = 'js-fallback') {
     return {
       start: start.toISOString(),
       end: end.toISOString(),
@@ -47,7 +59,7 @@ class JsFallbackActivityState {
         name: window.processName || '',
         path: window.executablePath || window.path || ''
       },
-      source: 'js-fallback'
+      source
     };
   }
 
@@ -72,9 +84,20 @@ class JsFallbackActivityState {
     this.activeSince = null;
     return [event];
   }
+
+  current(now = this.now()) {
+    if (!this.activeWindow || !this.activeSince) return null;
+    return this.eventFor(this.activeWindow, this.activeSince, now, 'live');
+  }
+
+  clear() {
+    this.activeWindow = null;
+    this.activeSince = null;
+  }
 }
 
 const jsFallbackActivity = new JsFallbackActivityState();
+const liveForeground = new JsFallbackActivityState();
 
 function dataPaths() {
   // Keep `npm start` data visible in the repository. Packaged apps use the
@@ -116,31 +139,16 @@ function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
-function sendJson(response, statusCode, body, headers = {}) {
-  const payload = JSON.stringify(body);
-  response.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload), ...headers });
-  response.end(payload);
-}
-
-function readRequestBody(request) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    request.on('data', (chunk) => {
-      body += chunk;
-      if (body.length > 10000) reject(new Error('Request body is too large'));
-    });
-    request.on('end', () => {
-      try { resolve(body ? JSON.parse(body) : {}); } catch { reject(new Error('Request body must be valid JSON')); }
-    });
-    request.on('error', reject);
-  });
-}
-
 function insightsWithFeedback() {
   const paths = dataPaths();
   const activity = getDataStore().getActivity();
   const feedback = readFeedback(paths.feedback);
   return applyFeedback(generateInsights(activity), feedback);
+}
+
+function personalDashboard() {
+  const currentWork = observerState.running && !observerState.lastCaptureError ? liveForeground.current() : null;
+  return buildPersonalDashboard({ activity: getDataStore().getActivity(), insights: insightsWithFeedback(), currentWork });
 }
 
 function persistInsightFeedback(id, status) {
@@ -163,68 +171,23 @@ function currentFromLatest(latest) {
   };
 }
 
-function startApiServer() {
-  const port = Number(process.env.WINDOW_OBSERVER_API_PORT) || 47821;
-  apiServer = http.createServer((request, response) => {
-    const feedbackMatch = pathnameFor(request.url)?.match(/^\/api\/insights\/([^/]+)\/feedback$/);
-    if (request.method !== 'GET' && !(request.method === 'POST' && feedbackMatch)) {
-      sendJson(response, 405, { error: 'Method not allowed' }, { Allow: 'GET, POST' });
-      return;
-    }
-    let pathname;
-    try { pathname = new URL(request.url, 'http://127.0.0.1').pathname; } catch {
-      sendJson(response, 400, { error: 'Invalid request URL' });
-      return;
-    }
-    if (request.method === 'POST' && feedbackMatch) {
-      readRequestBody(request).then((body) => {
-        const status = String(body.status || '').toLowerCase();
-        if (!['correct', 'expected', 'incorrect', 'ignore'].includes(status)) {
-          sendJson(response, 400, { error: 'Feedback status must be correct, expected, incorrect, or ignore' });
-          return;
-        }
-        const insightId = decodeURIComponent(feedbackMatch[1]);
-        const insights = insightsWithFeedback();
-        if (insights.error) { sendJson(response, 404, insights); return; }
-        if (!insights.some((insight) => insight.id === insightId)) {
-          sendJson(response, 404, { error: 'Insight not found' });
-          return;
-        }
-        sendJson(response, 200, { id: insightId, ...persistInsightFeedback(insightId, status) });
-      }).catch((error) => sendJson(response, 400, { error: error.message }));
-      return;
-    }
-    if (pathname === '/api/activity') {
-      return sendJson(response, 200, getDataStore().getActivity());
-    }
-    if (pathname === '/api/current') {
-      const latest = getDataStore().getLatestSnapshot();
-      if (!latest) return sendJson(response, 404, { error: 'Current snapshot data is not available yet' });
-      return sendJson(response, 200, currentFromLatest(latest));
-    }
-    if (pathname === '/api/summary') {
-      return sendJson(response, 200, getDataStore().getSummary());
-    }
-    if (pathname === '/api/insights') {
-      const insights = insightsWithFeedback();
-      if (insights.error) return sendJson(response, insights.error.endsWith('yet') ? 404 : 500, insights);
-      return sendJson(response, 200, insights);
-    }
-    const insightMatch = pathname.match(/^\/api\/insights\/([^/]+)$/);
-    if (insightMatch) {
-      const insights = insightsWithFeedback();
-      if (insights.error) return sendJson(response, 404, insights);
-      const insight = insights.find((item) => item.id === decodeURIComponent(insightMatch[1]));
-      return insight ? sendJson(response, 200, insight) : sendJson(response, 404, { error: 'Insight not found' });
-    }
-    sendJson(response, 404, { error: 'Not found' });
+function createApiHandler() {
+  return createLocalApiHandler({
+    getActivity: () => getDataStore().getActivity(),
+    getLatestSnapshot: () => getDataStore().getLatestSnapshot(),
+    getSummary: () => getDataStore().getSummary(),
+    getInsights: insightsWithFeedback,
+    getPersonalDashboard: personalDashboard,
+    saveFeedback: persistInsightFeedback,
+    currentFromLatest
   });
-  apiServer.on('error', (error) => console.error(`Local API server error: ${error.message}`));
-  apiServer.listen(port, '127.0.0.1', () => console.log(`Local API listening at http://127.0.0.1:${port}`));
 }
 
-function pathnameFor(requestUrl) {
-  try { return new URL(requestUrl, 'http://127.0.0.1').pathname; } catch { return null; }
+function startApiServer() {
+  const port = Number(process.env.WINDOW_OBSERVER_API_PORT) || 47821;
+  apiServer = http.createServer(createApiHandler());
+  apiServer.on('error', (error) => console.error(`Local API server error: ${error.message}`));
+  apiServer.listen(port, '127.0.0.1', () => console.log(`Local API listening at http://127.0.0.1:${port}`));
 }
 
 function writeJson(file, value) {
@@ -368,15 +331,28 @@ function flushRustActivity() {
   return rustCollectorCommand('flush');
 }
 
+function jsFallbackResponse(windows, warning = null, degraded = false) {
+  return {
+    windows,
+    activityEvents: jsFallbackActivity.update(windows, new Date()),
+    collectorMode: 'js-fallback',
+    collectorWarning: warning || 'Using the JavaScript fallback collector.',
+    collectorDegraded: degraded
+  };
+}
+
 function windowsOpenApps() {
   const collector = process.env.WINDOW_OBSERVER_COLLECTOR || (process.platform === 'darwin' ? 'rust' : 'js');
   if (collector !== 'rust') {
-    return jsWindowsOpenApps().then((windows) => ({ windows, activityEvents: jsFallbackActivity.update(windows, new Date()) }));
+    return jsWindowsOpenApps().then((windows) => jsFallbackResponse(windows));
   }
-  return rustWindowsOpenApps().catch((error) => {
-    console.error(`Rust collector unavailable; using JavaScript fallback: ${error.message}`);
-    return jsWindowsOpenApps().then((windows) => ({ windows, activityEvents: jsFallbackActivity.update(windows, new Date()) }));
-  });
+  return rustWindowsOpenApps()
+    .then((result) => ({ ...result, collectorMode: 'rust', collectorWarning: null, collectorDegraded: false }))
+    .catch((error) => {
+      const warning = `Rust collector unavailable; using JavaScript fallback: ${error.message}`;
+      console.error(warning);
+      return jsWindowsOpenApps().then((windows) => jsFallbackResponse(windows, warning, true));
+    });
 }
 
 function openAccessibilitySettings() {
@@ -423,6 +399,11 @@ async function captureSnapshot({ runId } = {}) {
     const result = await windowsOpenApps();
     windows = Array.isArray(result) ? result : result.windows;
     activityEvents = Array.isArray(result) ? [] : (result.activityEvents || []);
+    observerState.collectorMode = Array.isArray(result) ? 'unknown' : result.collectorMode;
+    observerState.collectorWarning = Array.isArray(result) ? null : result.collectorWarning;
+    observerState.collectorDegraded = Boolean(Array.isArray(result) ? false : result.collectorDegraded);
+    observerState.lastCaptureError = null;
+    observerState.lastSuccessfulCaptureAt = new Date().toISOString();
     // A pause can happen while the native collector is responding. Do not let
     // that in-flight response write a snapshot after the observer was stopped.
     // Completed intervals are still durable activity data and must not be lost.
@@ -432,9 +413,13 @@ async function captureSnapshot({ runId } = {}) {
     }
   } catch (error) {
     windows = [{ appName: 'Observer error', processName: '', title: error.message, processId: null, isForeground: false }];
+    observerState.collectorDegraded = true;
+    observerState.lastCaptureError = error.message;
+    observerState.collectorWarning = `Collection failed: ${error.message}. Existing insights may be stale.`;
   }
 
   const snapshot = { timestamp, platform: process.platform, windowCount: windows.length, windows, activityEvents };
+  liveForeground.update(windows, new Date(timestamp));
   const latest = observerState.lastSnapshot || getDataStore().getLatestSnapshot();
   const changed = hasWindowSetChanged(latest, windows);
   getDataStore().enqueueCapture(snapshot, changed, activityEvents);
@@ -455,7 +440,7 @@ function runScheduledCapture() {
 async function startObserver(intervalMs = observerState.intervalMs) {
   await stopObserver({ closeActivity: false });
   observerRunId += 1;
-  observerState = { running: true, intervalMs: normalizeInterval(intervalMs), lastSnapshot: observerState.lastSnapshot };
+  observerState = { ...observerState, running: true, intervalMs: normalizeInterval(intervalMs), lastSnapshot: observerState.lastSnapshot };
   runScheduledCapture();
   observerTimer = setInterval(runScheduledCapture, observerState.intervalMs);
   return observerState;
@@ -483,6 +468,7 @@ async function stopObserver({ closeActivity = true } = {}) {
   observerTimer = null;
   observerState.running = false;
   if (closeActivity) await flushActiveInterval();
+  liveForeground.clear();
   return observerState;
 }
 
@@ -521,6 +507,7 @@ function registerIpcHandlers() {
   ipcMain.handle('observer:open-accessibility', openAccessibilitySettings);
   ipcMain.handle('observer:memory', getMemoryUsage);
   ipcMain.handle('observer:insights', () => insightsWithFeedback());
+  ipcMain.handle('observer:personal-dashboard', () => personalDashboard());
   ipcMain.handle('observer:feedback', (_, id, status) => {
     const allowed = ['correct', 'expected', 'incorrect', 'ignore'];
     if (!allowed.includes(status)) throw new Error('Invalid feedback status');
@@ -541,7 +528,20 @@ async function runHeadlessSmokeTest() {
   app.quit();
 }
 
-if (process.versions.electron) {
+if (process.versions.electron && !hasSingleInstanceLock) {
+  app.quit();
+}
+
+if (process.versions.electron && hasSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (app.isReady()) createWindow();
+      return;
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
   app.whenReady().then(process.env.WINDOW_OBSERVER_HEADLESS_TEST === '1' ? runHeadlessSmokeTest : registerIpcHandlers);
   app.on('before-quit', (event) => {
     if (quitFinalizationStarted) return;

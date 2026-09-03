@@ -37,6 +37,7 @@ function normalizeWindowTitle(title) {
 }
 
 function readableActivityEvent(event = {}) {
+  event = event && typeof event === 'object' ? event : {};
   const end = typeof event.end === 'string'
     ? event.end
     : (typeof event.timestamp === 'number' ? new Date(event.timestamp).toISOString() : event.timestamp);
